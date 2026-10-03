@@ -1,6 +1,16 @@
 ﻿[Setup]
 AppName=SideMemo
 AppVersion=1.0.5
+AppVerName=SideMemo 1.0.5
+AppPublisher=SideMemo
+AppPublisherURL=https://github.com/yuldaewoorim/SideMemo
+AppSupportURL=https://github.com/yuldaewoorim/SideMemo
+AppUpdatesURL=https://github.com/yuldaewoorim/SideMemo/releases
+VersionInfoCompany=SideMemo
+VersionInfoDescription=SideMemo Setup
+VersionInfoProductName=SideMemo
+VersionInfoProductVersion=1.0.5
+VersionInfoVersion=1.0.5.0
 DefaultDirName={autopf}\SideMemo
 DefaultGroupName=SideMemo
 OutputDir=installer

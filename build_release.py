@@ -28,6 +28,55 @@ iscc_exe = find_iscc()
 print(f"Base dir: {base_dir}")
 print(f"Python: {python_exe}")
 
+def find_signtool():
+    which_tool = shutil.which("signtool") or shutil.which("signtool.exe")
+    if which_tool:
+        return which_tool
+    kits = Path(r"C:\Program Files (x86)\Windows Kits\10\bin")
+    if kits.is_dir():
+        matches = sorted(kits.glob("*/x64/signtool.exe"), reverse=True)
+        if matches:
+            return str(matches[0])
+    return None
+
+
+def sign_file(path: Path) -> bool:
+    """Digitally sign a file when a certificate is configured.
+
+    Configure one of these environment variables to enable signing:
+      SIDEMEMO_SIGN_CERT        path to a .pfx/.p12 certificate
+      SIDEMEMO_SIGN_PASSWORD    password for the .pfx (optional)
+      SIDEMEMO_SIGN_THUMBPRINT  SHA1 thumbprint of a certificate in the store
+    """
+    sign_tool = find_signtool()
+    if not sign_tool:
+        print("Signing skipped: signtool.exe not found.")
+        return False
+    cert_path = os.environ.get("SIDEMEMO_SIGN_CERT")
+    thumbprint = os.environ.get("SIDEMEMO_SIGN_THUMBPRINT")
+    if not cert_path and not thumbprint:
+        print("Signing skipped: no certificate configured (set SIDEMEMO_SIGN_CERT or SIDEMEMO_SIGN_THUMBPRINT).")
+        return False
+    cmd = [sign_tool, "sign", "/fd", "sha256", "/tr", "http://timestamp.digicert.com", "/td", "sha256"]
+    if cert_path:
+        cmd += ["/f", cert_path]
+        if os.environ.get("SIDEMEMO_SIGN_PASSWORD"):
+            cmd += ["/p", os.environ["SIDEMEMO_SIGN_PASSWORD"]]
+    else:
+        cmd += ["/sha1", thumbprint]
+    cmd += [str(path)]
+    res = subprocess.run(cmd, capture_output=True, encoding="utf-8", errors="replace")
+    if res.stdout.strip():
+        print(res.stdout[-800:])
+    if res.stderr.strip():
+        print(res.stderr[-800:])
+    if res.returncode == 0:
+        print(f"Signed: {path}")
+        return True
+    print(f"Signing failed (exit {res.returncode}): {path}")
+    return False
+
+
 def remove_readonly(func, path, exc_info):
     try:
         os.chmod(path, stat.S_IWRITE)
@@ -73,6 +122,8 @@ cmd = [
     "--windowed",
     "--name", "SideMemo",
     "--icon", "app.ico",
+    "--version-file", "version_info.txt",
+    "--noupx",
     "sidememo.py"
 ]
 res = subprocess.run(cmd, cwd=str(base_dir), env=env, capture_output=True, encoding="utf-8", errors="replace")
@@ -147,6 +198,9 @@ if not os.environ.get("GITHUB_ACTIONS"):
 else:
     print("Running in GitHub Actions CI: skipping GUI launch test.")
 
+# 6b. Sign the built EXE when a certificate is configured
+sign_file(base_dir / "dist" / "SideMemo" / "SideMemo.exe")
+
 # 7. Compile with Inno Setup
 print(f"Compiling installer with Inno Setup: {iscc_exe}...")
 iss_path = base_dir / "SideMemo.iss"
@@ -166,3 +220,6 @@ if installer_exe.exists():
 else:
     print("ERROR: Installer file not found after build!")
     sys.exit(1)
+
+# 8. Sign the installer when a certificate is configured
+sign_file(base_dir / "installer" / "SideMemo-Setup.exe")
