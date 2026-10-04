@@ -4,3 +4,6 @@ __pycache__/
 *.pyc
 test_*.py
 installer/
+certs/
+*.pfx
+*.p12

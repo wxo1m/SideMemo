@@ -11,7 +11,9 @@ VersionInfoDescription=SideMemo Setup
 VersionInfoProductName=SideMemo
 VersionInfoProductVersion=1.0.5
 VersionInfoVersion=1.0.5.0
-DefaultDirName={autopf}\SideMemo
+PrivilegesRequired=lowest
+PrivilegesRequiredOverridesAllowed=dialog
+DefaultDirName={localappdata}\Programs\SideMemo
 DefaultGroupName=SideMemo
 OutputDir=installer
 OutputBaseFilename=SideMemo-Setup
@@ -35,7 +37,7 @@ Type: files; Name: "{app}\_internal\icudt*.dll"
 
 [Icons]
 Name: "{group}\SideMemo"; Filename: "{app}\SideMemo.exe"
-Name: "{autodesktop}\SideMemo"; Filename: "{app}\SideMemo.exe"; Tasks: desktopicon
+Name: "{userdesktop}\SideMemo"; Filename: "{app}\SideMemo.exe"; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\SideMemo.exe"; Description: "SideMemo 실행"; Flags: nowait postinstall skipifsilent
