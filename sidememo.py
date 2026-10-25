@@ -1133,7 +1133,7 @@ class SideMemo(QMainWindow):
     # ------------------------------------------------------------- sync/cloud
     def sync_client(self) -> SupabaseClient:
         s = self.data["settings"]
-        if not hasattr(self, "_sync_client"):
+        if getattr(self, "_sync_client", None) is None:
             self._sync_client = SupabaseClient(s.get("sync_url", ""), s.get("sync_key", ""), load_session())
         else:
             self._sync_client.url = (s.get("sync_url", "") or "").strip().rstrip("/")
