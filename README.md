@@ -23,10 +23,10 @@ Windows 화면 가장자리에서 열고 닫는 상단 고정 메모 앱입니�
 같은 계정으로 PC와 웹에서 메모를 함께 쓸 수 있습니다. Supabase 무료 프로젝트를 하나 만들면 됩니다.
 
 1. https://supabase.com 에서 무료 계정을 만들고 **New project**로 프로젝트를 생성합니다.
-2. 프로젝트의 **SQL Editor**를 열고 `web/supabase-schema.sql` 내용을 전체 붙여넣은 뒤 **Run**을 누릅니다. 표와 접근 권한이 한 번에 만들어집니다.
+2. 프로젝트의 **SQL Editor**를 열고 `docs/supabase-schema.sql` 내용을 전체 붙여넣은 뒤 **Run**을 누릅니다. 표와 접근 권한이 한 번에 만들어집니다.
 3. **Project Settings → API**에서 `Project URL`과 `anon public` 키를 복사합니다.
 4. PC 앱의 **설정 → 계정**에서 두 값을 붙여넣고 **로그인 / 계정**을 눌러 회원가입한 뒤 로그인합니다.
-5. 웹에서도 쓰려면 `web/config.js`의 두 값을 같은 내용으로 채우고, GitHub 저장소의 **Settings → Pages**에서 `main` 브랜치 `/web` 폴더를 배포 대상으로 지정합니다.
+5. 웹은 https://wxo1m.github.io/SideMemo/ 에서 바로 열립니다. 페이지 오른쪽 위의 **연결 설정**을 눌러 같은 주소와 anon key를 넣으면 PC와 같은 메모가 나타납니다.
 
 동기화는 설정한 주기마다 자동으로 실행되며, 트레이 메뉴의 **지금 동기화**로 즉시 맞출 수 있습니다. 첨부 이미지는 1.5MB 이하일 때만 함께 올라갑니다.
 

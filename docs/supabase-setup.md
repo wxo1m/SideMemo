@@ -11,7 +11,7 @@ PC 앱과 웹 앱이 같은 메모를 함께 쓰려면 Supabase 프로젝트가 
 ## 2. 표와 권한 만들기
 
 1. 왼쪽 메뉴에서 **SQL Editor**를 엽니다.
-2. 이 저장소의 `web/supabase-schema.sql` 파일 내용을 전부 복사해 붙여넣습니다.
+2. 이 저장소의 `docs/supabase-schema.sql` 파일 내용을 전부 복사해 붙여넣습니다.
 3. **Run**을 누릅니다. `sidememo_notes`, `sidememo_settings` 표와 행 수준 보안 정책이 만들어집니다.
 
 ## 3. 접속 정보 복사하기
@@ -35,10 +35,9 @@ anon 키는 공개되어도 안전합니다. 행 수준 보안 덕분에 다른 
 
 ## 5. 웹에서 쓰기
 
-1. `web/config.js`를 열어 `supabaseUrl`, `supabaseAnonKey`를 채웁니다.
-2. GitHub 저장소의 **Settings → Pages**에서 Source를 `Deploy from a branch`, 브랜치를 `main`, 폴더를 `/web`으로 지정하고 저장합니다.
-3. 잠시 뒤 `https://<사용자>.github.io/SideMemo/` 에서 웹 앱이 열립니다.
-4. 같은 이메일과 비밀번호로 로그인하면 PC의 메모가 그대로 나타납니다.
+1. https://wxo1m.github.io/SideMemo/ 를 브라우저에서 엽니다.
+2. 오른쪽 위의 **연결 설정**을 눌러 3번에서 복사한 **Project URL**과 **anon public** 키를 붙여넣고 **저장**합니다.
+3. 같은 이메일과 비밀번호로 로그인하면 PC의 메모가 그대로 나타납니다.
 
 웹에서 수정한 내용은 실시간 채널로 PC에 전달되고, PC에서 수정한 내용도 웹에 반영됩니다.
 
