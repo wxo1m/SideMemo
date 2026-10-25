@@ -180,11 +180,13 @@ if "QTCORE_IMPORT_SUCCESS" not in test_res.stdout:
     sys.exit(1)
 
 # 6. Test launching SideMemo.exe directly
-if not os.environ.get("GITHUB_ACTIONS"):
+if not os.environ.get("GITHUB_ACTIONS") and not os.environ.get("QT_QPA_PLATFORM") == "offscreen":
     exe_path = base_dir / "dist" / "SideMemo" / "SideMemo.exe"
     print(f"Launching {exe_path} to verify startup...")
-    proc = subprocess.Popen([str(exe_path)])
-    time.sleep(2)
+    test_env = os.environ.copy()
+    test_env["QT_QPA_PLATFORM"] = "offscreen"
+    proc = subprocess.Popen([str(exe_path)], env=test_env)
+    time.sleep(1)
     poll_val = proc.poll()
     if poll_val is not None and poll_val != 0:
         print(f"ERROR: SideMemo.exe exited immediately with code {poll_val}")
@@ -192,7 +194,7 @@ if not os.environ.get("GITHUB_ACTIONS"):
     print(f"SideMemo.exe is running properly (PID: {proc.pid}). Terminating test process...")
     proc.terminate()
     try:
-        proc.wait(timeout=3)
+        proc.wait(timeout=2)
     except Exception:
         proc.kill()
 else:

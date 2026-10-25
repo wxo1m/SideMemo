@@ -248,11 +248,12 @@ class UpdateCheckWorker(QThread):
             with urllib.request.urlopen(v_req, timeout=5) as resp:
                 if resp.status == 200:
                     v_data = json.loads(resp.read().decode("utf-8"))
+                    is_prerelease = bool(v_data.get("prerelease", False))
                     v_ver = v_data.get("version", "").strip()
                     v_notes = v_data.get("release_notes", "").strip()
                     v_dl = v_data.get("download_url", "").strip()
                     v_ok = True
-                    if parse_version(v_ver) > parse_version(APP_VERSION):
+                    if not is_prerelease and parse_version(v_ver) > parse_version(APP_VERSION):
                         latest_tag = f"v{v_ver}" if not v_ver.startswith("v") else v_ver
                         release_notes = v_notes
                         download_url = v_dl or f"https://github.com/{GITHUB_REPO}/releases/download/{latest_tag}/SideMemo-Setup.exe"
@@ -270,10 +271,11 @@ class UpdateCheckWorker(QThread):
             with urllib.request.urlopen(r_req, timeout=5) as resp:
                 if resp.status == 200:
                     r_data = json.loads(resp.read().decode("utf-8"))
+                    is_prerelease = bool(r_data.get("prerelease", False)) or bool(r_data.get("draft", False))
                     r_tag = r_data.get("tag_name", "").strip()
                     r_body = r_data.get("body", "").strip()
                     r_ok = True
-                    if parse_version(r_tag) > parse_version(APP_VERSION):
+                    if not is_prerelease and parse_version(r_tag) > parse_version(APP_VERSION):
                         latest_tag = r_tag
                         if r_body and not release_notes:
                             release_notes = r_body
