@@ -44,7 +44,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QColorDialog, QComboBox,
 from sidememo_sync import SyncError, SupabaseClient
 
 APP_NAME = "SideMemo"
-APP_VERSION = "1.0.6"
+APP_VERSION = "1.0.7"
 GITHUB_REPO = "wxo1m/SideMemo"
 BASE_DIR = Path(__file__).resolve().parent
 ICON_PATH = BASE_DIR / "app.ico"
