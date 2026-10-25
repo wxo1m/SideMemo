@@ -2,6 +2,7 @@
 from __future__ import annotations
 import ctypes
 import ctypes.wintypes
+from datetime import datetime, timezone
 import json
 import os
 import re
@@ -40,9 +41,11 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QColorDialog, QComboBox,
     QFrame, QGraphicsOpacityEffect, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QProgressBar, QPushButton,
     QScrollArea, QSizePolicy, QSlider, QSpinBox, QStyle, QSystemTrayIcon, QTextEdit, QToolButton, QVBoxLayout, QWidget)
 
+from sidememo_sync import SyncError, SupabaseClient
+
 APP_NAME = "SideMemo"
-APP_VERSION = "1.0.5"
-GITHUB_REPO = "yuldaewoorim/SideMemo"
+APP_VERSION = "1.0.6"
+GITHUB_REPO = "wxo1m/SideMemo"
 BASE_DIR = Path(__file__).resolve().parent
 ICON_PATH = BASE_DIR / "app.ico"
 DATA_DIR = Path(QStandardPaths.writableLocation(QStandardPaths.AppDataLocation))
@@ -79,10 +82,44 @@ DIMENSIONS = {
 }
 TAB_WIDTH = 46
 DEFAULT = {"settings": {"position": "오른쪽", "size": "360×360 (기본)", "opacity": 100,
-    "behavior": "마우스 조작", "delay": 0.3, "checklist": True, "tray": True, "autostart": False},
+    "behavior": "마우스 조작", "delay": 0.3, "checklist": True, "tray": True, "autostart": False, "font": "맑은 고딕",
+    "sync_enabled": False, "sync_url": "", "sync_key": "", "sync_interval": 60},
     "notes": [{"id": "note1", "title": "NOTE 1", "theme": "노랑", "font": "맑은 고딕", "font_size": 18, "tab_slot": "1번 칸", "html": "", "attachment": ""},
     {"id": "note2", "title": "NOTE 2", "theme": "초록", "font": "맑은 고딕", "font_size": 16, "tab_slot": "2번 칸", "html": "", "attachment": ""},
-    {"id": "note3", "title": "NOTE 3", "theme": "파랑", "font": "맑은 고딕", "font_size": 16, "tab_slot": "3번 칸", "html": "", "attachment": ""}]}
+    {"id": "note3", "title": "NOTE 3", "theme": "파랑", "font": "맑은 고딕", "font_size": 16, "tab_slot": "3번 칸", "html": "", "attachment": ""}],
+    "tombstones": {}}
+
+SESSION_FILE = DATA_DIR / "sidememo_session.json"
+
+
+def html_signature(html: str) -> str:
+    """Coarse fingerprint of note HTML, ignoring whitespace-only differences.
+
+    Qt re-serializes the document on every load, so comparing raw strings would
+    report a change for notes that are actually identical and could bounce the
+    same note between two devices forever.
+    """
+    compact = re.sub(r">\s+<", "><", str(html or ""))
+    return re.sub(r"\s+", " ", compact).strip()
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+
+def load_session() -> dict:
+    try:
+        return json.loads(SESSION_FILE.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def save_session(session: dict) -> None:
+    try:
+        data_path()
+        SESSION_FILE.write_text(json.dumps(session, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError:
+        pass
 
 STYLE = """
 QWidget { color:#242a38; }
@@ -417,6 +454,118 @@ def check_for_updates(parent=None, silent_if_latest=True):
         parent._update_worker = worker
     return worker
 
+
+ATTACH_SYNC_LIMIT = 1_500_000  # 1.5MB - keep the synced JSON payload reasonable
+
+
+def attachment_to_data_uri(path: str) -> str:
+    """Encode a local attachment so the web app can render it without file access."""
+    try:
+        candidate = Path(path)
+        if not candidate.is_file() or candidate.stat().st_size > ATTACH_SYNC_LIMIT:
+            return ""
+        import base64
+        suffix = candidate.suffix.lower().lstrip(".") or "png"
+        mime = {"jpg": "jpeg", "jpeg": "jpeg", "png": "png", "gif": "gif", "bmp": "bmp"}.get(suffix, "png")
+        encoded = base64.b64encode(candidate.read_bytes()).decode("ascii")
+        return f"data:image/{mime};base64,{encoded}"
+    except (OSError, ValueError):
+        return ""
+
+
+class SyncCycle(QThread):
+    """One push-then-pull round trip against Supabase, off the UI thread."""
+
+    completed = Signal(list, object, list, object)
+    failed = Signal(str)
+    auth_lost = Signal()
+
+    def __init__(self, client: SupabaseClient, push_rows: list[dict], push_settings: dict | None,
+                 since: str | None, parent=None, pull_only: bool = False):
+        super().__init__(parent)
+        self.client = client
+        self.push_rows = [] if pull_only else push_rows
+        self.push_settings = None if pull_only else push_settings
+        self.since = since
+
+    def run(self):
+        try:
+            pushed_rows = self.client.push_notes(self.push_rows) if self.push_rows else []
+            pushed_settings = self.client.push_settings(self.push_settings) if self.push_settings is not None else None
+            rows = self.client.pull_notes(self.since)
+            settings_row = self.client.pull_settings()
+            self.completed.emit(rows, settings_row, pushed_rows or [], pushed_settings)
+        except SyncError as exc:
+            message = str(exc)
+            if "다시 로그인" in message or "만료" in message or "로그인 정보" in message:
+                self.auth_lost.emit()
+            self.failed.emit(message)
+        except Exception as exc:  # pragma: no cover - defensive
+            self.failed.emit(str(exc))
+
+
+class LoginDialog(QDialog):
+    """Sign in / sign up against the configured Supabase project."""
+
+    def __init__(self, app: "SideMemo", parent=None):
+        super().__init__(parent or app)
+        self.app = app
+        self.dark = is_dark_mode()
+        self.setWindowTitle("SideMemo 로그인")
+        self.setMinimumWidth(420)
+        self.setStyleSheet(get_style())
+        self.setWindowIcon(get_app_icon())
+        root = QVBoxLayout(self)
+        root.setContentsMargins(22, 20, 22, 18)
+        root.setSpacing(10)
+        sub = "#aaaaaa" if self.dark else "#666666"
+        root.addWidget(QLabel(f"<b style='font-size:19px'>SideMemo 계정</b><br>"
+                              f"<span style='color:{sub}'>같은 계정으로 PC와 웹에서 메모를 함께 사용합니다.</span>"))
+        self.email = QLineEdit(self.app.data["settings"].get("sync_email", ""))
+        self.email.setPlaceholderText("이메일 주소")
+        self.password = QLineEdit()
+        self.password.setPlaceholderText("비밀번호 (6자 이상)")
+        self.password.setEchoMode(QLineEdit.EchoMode.Password)
+        root.addWidget(QLabel("이메일")); root.addWidget(self.email)
+        root.addWidget(QLabel("비밀번호")); root.addWidget(self.password)
+        self.status = QLabel("")
+        self.status.setWordWrap(True)
+        root.addWidget(self.status)
+        buttons = QHBoxLayout()
+        self.sign_in_btn = QPushButton("로그인")
+        self.sign_in_btn.setStyleSheet("background:#9250bc;color:white;font-weight:bold;")
+        self.sign_up_btn = QPushButton("회원가입")
+        cancel = QPushButton("닫기")
+        buttons.addStretch(); buttons.addWidget(self.sign_up_btn); buttons.addWidget(self.sign_in_btn); buttons.addWidget(cancel)
+        root.addLayout(buttons)
+        self.sign_in_btn.clicked.connect(lambda: self.submit(sign_up=False))
+        self.sign_up_btn.clicked.connect(lambda: self.submit(sign_up=True))
+        cancel.clicked.connect(self.reject)
+
+    def submit(self, sign_up: bool):
+        email = self.email.text().strip()
+        password = self.password.text()
+        if not email or not password:
+            self.status.setText("이메일과 비밀번호를 모두 입력해 주세요.")
+            return
+        if sign_up and len(password) < 6:
+            self.status.setText("비밀번호는 6자 이상이어야 합니다.")
+            return
+        self.sign_in_btn.setEnabled(False); self.sign_up_btn.setEnabled(False)
+        self.status.setText("처리 중...")
+        QApplication.processEvents()
+        try:
+            session = self.app.sync_sign_up(email, password) if sign_up else self.app.sync_sign_in(email, password)
+        except SyncError as exc:
+            self.status.setText(str(exc))
+            self.sign_in_btn.setEnabled(True); self.sign_up_btn.setEnabled(True)
+            return
+        self.sign_in_btn.setEnabled(True); self.sign_up_btn.setEnabled(True)
+        if not session:
+            self.status.setText("가입 확인 메일을 보냈습니다. 메일 인증 후 로그인해 주세요.")
+            return
+        self.accept()
+
 class SettingsDialog(QDialog):
     def __init__(self, app: "SideMemo", note_index: int | None = None):
         super().__init__(app); self.app, self.note_index = app, note_index; self.dark = is_dark_mode()
@@ -494,6 +643,40 @@ class SettingsDialog(QDialog):
         self.row("메모 불투명도", op_widget)
         self.behavior = QComboBox(); self.behavior.addItems(["마우스 조작", "항상 펼침"]); self.behavior.setCurrentText(s["behavior"]); self.row("메모 열기 방법", self.behavior)
         self.delay = QDoubleSpinBox(); self.delay.setRange(0.1, 5.0); self.delay.setSingleStep(0.1); self.delay.setDecimals(1); self.delay.setSuffix("초"); self.delay.setValue(float(s.get("delay", 0.3))); self.row("접힘 대기 시간", self.delay)
+        self.global_font = QFontComboBox()
+        self.global_font.setEditable(False)
+        cur_global_font = s.get("font", "맑은 고딕")
+        self.global_font.setCurrentFont(QFont(cur_global_font))
+        self.row("전체 글꼴", self.global_font)
+        self.sample = QLabel("가나다 ABC 123")
+        self.update_sample_font(cur_global_font)
+        self.global_font.currentFontChanged.connect(lambda f: self.update_sample_font(f.family()))
+        self.form.addWidget(self.sample)
+        self.sync_enabled = QCheckBox("이 PC에서 자동 동기화 사용")
+        self.sync_enabled.setChecked(bool(s.get("sync_enabled", False)))
+        self.row("자동 동기화", self.sync_enabled)
+        self.sync_url = QLineEdit(s.get("sync_url", "")); self.sync_url.setPlaceholderText("https://<project>.supabase.co")
+        self.row("Supabase 주소", self.sync_url)
+        self.sync_key = QLineEdit(s.get("sync_key", "")); self.sync_key.setPlaceholderText("anon public key")
+        self.row("Supabase anon key", self.sync_key)
+        self.sync_interval = QSpinBox(); self.sync_interval.setRange(15, 3600); self.sync_interval.setSuffix("초")
+        self.sync_interval.setValue(int(s.get("sync_interval", 60))); self.row("동기화 주기", self.sync_interval)
+        account = QWidget(); al2 = QHBoxLayout(account); al2.setContentsMargins(0,0,0,0)
+        login_btn = QPushButton("로그인 / 계정"); login_btn.clicked.connect(self.app.open_login)
+        sync_btn = QPushButton("지금 동기화"); sync_btn.clicked.connect(lambda: self.app.sync_now(manual=True))
+        al2.addWidget(login_btn); al2.addWidget(sync_btn); al2.addStretch()
+        self.row("계정", account)
+        winget_widget = QWidget(); wl = QHBoxLayout(winget_widget); wl.setContentsMargins(0,0,0,0)
+        self.winget_edit = QLineEdit("winget install wxo1m.SideMemo")
+        self.winget_edit.setReadOnly(True)
+        copy_btn = QPushButton("복사")
+        def copy_cmd():
+            QApplication.clipboard().setText("winget install wxo1m.SideMemo")
+            copy_btn.setText("복사됨!")
+            QTimer.singleShot(1500, lambda: copy_btn.setText("복사"))
+        copy_btn.clicked.connect(copy_cmd)
+        wl.addWidget(self.winget_edit, 1); wl.addWidget(copy_btn)
+        self.row("winget 명령어", winget_widget)
         self.checklist = QCheckBox("체크리스트 도구 모음 사용"); self.checklist.setChecked(s["checklist"]); self.row("체크리스트", self.checklist)
         backup = QWidget(); bl = QHBoxLayout(backup); bl.setContentsMargins(0,0,0,0); export = QPushButton("백업 내보내기"); restore = QPushButton("백업 가져오기"); export.clicked.connect(self.app.export_backup); restore.clicked.connect(self.app.import_backup); bl.addWidget(export); bl.addWidget(restore); self.row("백업 관리", backup)
         self.tray_box.setChecked(s["tray"]); self.start_box.setChecked(s["autostart"])
@@ -563,8 +746,18 @@ class SettingsDialog(QDialog):
 
     def apply(self):
         if self.note_index is None:
-            s = self.app.data["settings"]; s.update({"size":self.memo_size.currentText(), "opacity":self.opacity.value(), "behavior":self.behavior.currentText(), "delay":round(self.delay.value(), 1), "checklist":self.checklist.isChecked(), "tray":self.tray_box.isChecked(), "autostart":self.start_box.isChecked()})
+            chosen_global_font = self.global_font.currentFont().family()
+            s = self.app.data["settings"]; s.update({"size":self.memo_size.currentText(), "opacity":self.opacity.value(), "behavior":self.behavior.currentText(), "delay":round(self.delay.value(), 1), "checklist":self.checklist.isChecked(), "tray":self.tray_box.isChecked(), "autostart":self.start_box.isChecked(), "font":chosen_global_font, "sync_enabled":self.sync_enabled.isChecked(), "sync_url":self.sync_url.text().strip(), "sync_key":self.sync_key.text().strip(), "sync_interval":self.sync_interval.value()})
+            self.app.save_editor()
+            s.pop("settings_synced_at", None)
+            for note in self.app.data["notes"]:
+                note["font"] = chosen_global_font
+                if note.get("html"):
+                    note["html"] = re.sub(r"font-family:[^;\"'\s]+", f"font-family:'{chosen_global_font}'", note["html"])
+                note.pop("synced_at", None)
+            self.app.set_note(self.app.active)
             self.app.update_autostart(); self.app.reposition(); self.app.update_opacity(); self.app.setup_tray()
+            self.app.start_sync_timer()
         else:
             self.app.save_editor(); notes = self.app.data["notes"]
             n = notes[self.note_index]
@@ -573,6 +766,7 @@ class SettingsDialog(QDialog):
             if self.current_theme == "커스텀" and hasattr(self, "current_custom_color") and self.current_custom_color:
                 n["custom_color"] = list(self.current_custom_color)
             if hasattr(self, "attachment"): n["attachment"] = self.attachment
+            n.pop("synced_at", None)
             try:
                 target_pos = int(self.slot.currentText().replace("번 칸", "").strip()) - 1
             except Exception:
@@ -582,6 +776,8 @@ class SettingsDialog(QDialog):
                 notes.insert(target_pos, moved_note)
                 self.note_index = target_pos
                 self.app.active = target_pos
+                for item in notes:
+                    item.pop("synced_at", None)
             for i, note in enumerate(notes):
                 note["tab_slot"] = f"{i+1}번 칸"
             self.app.set_note(self.note_index)
@@ -598,6 +794,8 @@ class SideMemo(QMainWindow):
         self.setStyleSheet(STYLE); self.build(); self.setup_tray(); self.setup_single_instance(); self.register_hotkey(); self.set_note(0); self.reposition(); self.page.hide(); self.show(); self.raise_()
         self.save_timer = QTimer(self); self.save_timer.setSingleShot(True); self.save_timer.timeout.connect(self.save_editor)
         QTimer.singleShot(2500, lambda: check_for_updates(parent=self, silent_if_latest=True))
+        self._sync_client = None; self._syncing = False; self._sync_since = None; self._sync_status = ""
+        QTimer.singleShot(1500, self.start_sync_timer)
 
     def build(self):
         central = QWidget(); central.setStyleSheet("background:transparent;"); self.setCentralWidget(central); self.root_layout = QHBoxLayout(central); self.root_layout.setContentsMargins(0,0,0,0); self.root_layout.setSpacing(0)
@@ -668,7 +866,15 @@ class SideMemo(QMainWindow):
         self.apply_current_note_font()
 
     def save_editor(self):
-        if self.data["notes"]: self.data["notes"][self.active]["html"] = self.editor.toHtml(); save_data(self.data)
+        if self.data["notes"]:
+            note = self.data["notes"][self.active]
+            html = self.editor.toHtml()
+            if html_signature(note.get("html")) != html_signature(html):
+                note["html"] = html
+                note.pop("synced_at", None)
+            else:
+                note["html"] = html
+            save_data(self.data)
 
     def queue_save(self): self.save_timer.start(650) if hasattr(self,"save_timer") else None
     def format(self, fn): fn(); self.editor.setFocus(); self.queue_save()
@@ -748,7 +954,10 @@ class SideMemo(QMainWindow):
     def open_settings(self): SettingsDialog(self).exec()
     def create_new_note(self):
         self.save_editor(); next_idx = len(self.data["notes"]) + 1
-        self.data["notes"].append({"id":uuid.uuid4().hex,"title":f"NOTE {next_idx}","theme":"보라","font":"맑은 고딕","font_size":16,"tab_slot":f"{next_idx}번 칸","html":"","attachment":""})
+        global_font = self.data["settings"].get("font", "맑은 고딕")
+        for item in self.data["notes"]:
+            item.pop("synced_at", None)
+        self.data["notes"].append({"id":uuid.uuid4().hex,"title":f"NOTE {next_idx}","theme":"보라","font":global_font,"font_size":16,"tab_slot":f"{next_idx}번 칸","html":"","attachment":""})
         self.set_note(len(self.data["notes"]) - 1); save_data(self.data)
     def new_note(self):
         self.create_new_note(); SettingsDialog(self, self.active).exec()
@@ -760,9 +969,13 @@ class SideMemo(QMainWindow):
         if answer != QMessageBox.StandardButton.Yes: return
         attachment = Path(note.get("attachment", ""))
         self.data["notes"].pop(self.active)
+        self.data.setdefault("tombstones", {})[str(note.get("id", ""))] = True
         if attachment.is_file() and attachment.parent == ATTACH_DIR:
             try: attachment.unlink()
             except OSError: pass
+        for index, item in enumerate(self.data["notes"]):
+            item["tab_slot"] = f"{index+1}번 칸"
+            item.pop("synced_at", None)
         self.active = max(0, min(self.active, len(self.data["notes"]) - 1)); self.set_note(self.active); save_data(self.data)
     def toggle_toolbar_lock(self): self.toolbar_locked=not self.toolbar_locked; self.ice.setStyleSheet("background:#b8e6f7;" if self.toolbar_locked else ""); self.toolbar.show()
     def enterEvent(self,event): self.timer.stop(); self.toolbar.show(); super().enterEvent(event)
@@ -782,6 +995,7 @@ class SideMemo(QMainWindow):
         self.data["settings"]["size"] = sizes.get(self.data["settings"].get("size"), self.data["settings"].get("size", "360×360 (기본)"))
         self.data["settings"].pop("monitor", None)
         self.data["settings"].pop("toggle", None)
+        self.data["settings"].pop("spell", None)
 
     def arrange_side(self):
         self.root_layout.removeWidget(self.page); self.root_layout.removeWidget(self.tab_view)
@@ -911,10 +1125,295 @@ class SideMemo(QMainWindow):
     def setup_tray(self):
         if not hasattr(self,"tray"): self.tray=QSystemTrayIcon(get_app_icon(),self); self.tray.activated.connect(lambda reason:self.show_and_raise() if reason==QSystemTrayIcon.ActivationReason.Trigger else None)
         else: self.tray.setIcon(get_app_icon())
-        menu=QMenu(); menu.addAction("열기",self.show_and_raise); menu.addAction("새 메모",self.new_note); menu.addAction("설정",self.open_settings); menu.addSeparator(); menu.addAction("백업 내보내기",self.export_backup); menu.addAction("종료",self.quit); self.tray.setContextMenu(menu); self.tray.setVisible(self.data["settings"].get("tray",True))
+        menu=QMenu(); menu.addAction("열기",self.show_and_raise); menu.addAction("새 메모",self.new_note); menu.addAction("설정",self.open_settings); menu.addSeparator(); menu.addAction("백업 내보내기",self.export_backup); menu.addAction("지금 동기화",lambda: self.sync_now(manual=True)); menu.addAction("로그인 / 계정",self.open_login); menu.addSeparator(); menu.addAction("종료",self.quit); self.tray.setContextMenu(menu); self.tray.setVisible(self.data["settings"].get("tray",True))
     def show_and_raise(self): self.show(); self.raise_(); self.activateWindow(); self.expand()
     def closeEvent(self,event): event.ignore(); self.hide(); self.tray.showMessage("SideMemo", "트레이에서 다시 열 수 있습니다.")
     def quit(self): self.save_editor(); self.unregister_hotkey(); QApplication.quit()
+
+    # ------------------------------------------------------------- sync/cloud
+    def sync_client(self) -> SupabaseClient:
+        s = self.data["settings"]
+        if not hasattr(self, "_sync_client"):
+            self._sync_client = SupabaseClient(s.get("sync_url", ""), s.get("sync_key", ""), load_session())
+        else:
+            self._sync_client.url = (s.get("sync_url", "") or "").strip().rstrip("/")
+            self._sync_client.anon_key = (s.get("sync_key", "") or "").strip()
+        return self._sync_client
+
+    def sync_sign_in(self, email: str, password: str):
+        client = self.sync_client()
+        session = client.sign_in(email, password)
+        save_session(session)
+        self.data["settings"]["sync_enabled"] = True
+        self.data["settings"]["sync_email"] = email
+        save_data(self.data)
+        self.sync_now(manual=True, initial=True)
+        return session
+
+    def sync_sign_up(self, email: str, password: str):
+        client = self.sync_client()
+        try:
+            session = client.sign_up(email, password)
+        except SyncError as exc:
+            if "가입 확인 메일" in str(exc):
+                return None
+            raise
+        save_session(session)
+        self.data["settings"]["sync_enabled"] = True
+        self.data["settings"]["sync_email"] = email
+        save_data(self.data)
+        self.sync_now(manual=True, initial=True)
+        return session
+
+    def sync_sign_out(self):
+        try:
+            self.sync_client().sign_out()
+        except SyncError:
+            pass
+        save_session({})
+        self.data["settings"]["sync_enabled"] = False
+        save_data(self.data)
+
+    def open_login(self):
+        if not self.data["settings"].get("sync_url") or not self.data["settings"].get("sync_key"):
+            QMessageBox.information(self, "로그인",
+                "먼저 설정 > 동기화에서 Supabase 주소와 anon key를 입력해 주세요.")
+            return
+        client = self.sync_client()
+        if client.signed_in:
+            answer = QMessageBox.question(self, "계정",
+                f"{client.email} (으)로 로그인되어 있습니다.\n로그아웃할까요?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if answer == QMessageBox.StandardButton.Yes:
+                self.sync_sign_out()
+                QMessageBox.information(self, "계정", "로그아웃했습니다.")
+            return
+        dlg = LoginDialog(self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            QMessageBox.information(self, "계정", f"{client.email} (으)로 로그인했습니다.")
+
+    def note_payload(self, note: dict) -> dict:
+        """Serialize one note for the cloud, dropping local-only bookkeeping."""
+        payload = {k: v for k, v in note.items()
+                   if k not in ("synced_at", "attachment", "attachment_data")}
+        if payload.get("attachment"):
+            encoded = attachment_to_data_uri(str(payload["attachment"]))
+            if encoded:
+                payload["attachment_data"] = encoded
+        return payload
+
+    def build_push_rows(self) -> list[dict]:
+        """Rows that changed locally since the last successful sync.
+
+        A note is considered dirty when it has no ``synced_at`` stamp, which
+        every local edit clears. Tombstones are pushed until the server echoes
+        back a timestamp for them.
+        """
+        rows: list[dict] = []
+        user_id = self.sync_client().user_id
+        for position, note in enumerate(self.data.get("notes", [])):
+            note_id = str(note.get("id") or uuid.uuid4().hex)
+            note["id"] = note_id
+            if note.get("synced_at"):
+                continue
+            if str(note_id) in self.data.get("tombstones", {}):
+                continue
+            rows.append({"user_id": user_id, "note_id": note_id, "position": position,
+                         "payload": self.note_payload(note), "deleted": False})
+        for note_id, stamp in list(self.data.get("tombstones", {}).items()):
+            # True = 아직 서버가 확인하지 않은 삭제, 문자열 = 서버가 확인한 시각
+            if stamp is not True:
+                continue
+            rows.append({"user_id": user_id, "note_id": str(note_id), "position": -1,
+                         "payload": {"id": str(note_id)}, "deleted": True})
+        return rows
+
+    def confirm_pushed(self, pushed_rows: list[dict]) -> None:
+        """Adopt the server timestamp for rows we just wrote."""
+        by_id = {str(n.get("id")): n for n in self.data.get("notes", [])}
+        for row in pushed_rows or []:
+            note_id = str(row.get("note_id") or "")
+            stamp = row.get("updated_at") or ""
+            if not note_id or not stamp:
+                continue
+            if row.get("deleted"):
+                self.data.setdefault("tombstones", {})[note_id] = stamp
+                continue
+            note = by_id.get(note_id)
+            if note is not None:
+                note["synced_at"] = stamp
+
+    def merge_remote_notes(self, rows: list[dict]) -> bool:
+        """Fold server rows into local state. Returns True when data changed."""
+        changed = False
+        by_id = {str(n.get("id")): n for n in self.data.get("notes", [])}
+        fresh: list[tuple[int, str]] = []
+        for row in rows or []:
+            note_id = str(row.get("note_id") or "")
+            if not note_id:
+                continue
+            remote_stamp = row.get("updated_at") or ""
+            if row.get("deleted"):
+                if note_id in by_id:
+                    by_id.pop(note_id)
+                    changed = True
+                self.data.setdefault("tombstones", {})[note_id] = remote_stamp or True
+                continue
+            local = by_id.get(note_id)
+            payload = row.get("payload") or {}
+            if local is None:
+                payload["id"] = note_id
+                payload["synced_at"] = remote_stamp
+                by_id[note_id] = payload
+                fresh.append((int(row.get("position") or 0), note_id))
+                changed = True
+                continue
+            # Local edits not yet pushed stay authoritative for this cycle.
+            if not local.get("synced_at"):
+                continue
+            if local.get("synced_at") == remote_stamp:
+                continue
+            payload["id"] = note_id
+            payload["synced_at"] = remote_stamp
+            local_attach = str(local.get("attachment") or "")
+            if local_attach and not payload.get("attachment"):
+                payload["attachment"] = local_attach
+            by_id[note_id] = payload
+            changed = True
+        if changed:
+            order = [str(n.get("id")) for n in self.data.get("notes", []) if str(n.get("id")) in by_id]
+            if fresh:
+                distant = max(0, len(order) - len(fresh))
+                order += [note_id for _, note_id in sorted(fresh, key=lambda item: (item[0] if item[0] < distant else distant, item[1]))]
+            seen: set[str] = set()
+            ordered: list[dict] = []
+            for note_id in order:
+                if note_id in seen or note_id not in by_id:
+                    continue
+                seen.add(note_id)
+                ordered.append(by_id[note_id])
+            if not ordered:
+                ordered = [{"id": uuid.uuid4().hex, "title": "NOTE 1", "theme": "노랑",
+                            "font": self.data["settings"].get("font", "맑은 고딕"),
+                            "font_size": 16, "tab_slot": "1번 칸", "html": "", "attachment": ""}]
+            for index, note in enumerate(ordered):
+                note["tab_slot"] = f"{index+1}번 칸"
+            self.data["notes"] = ordered
+        return changed
+
+    def merge_remote_settings(self, settings_row: dict | None) -> bool:
+        """Adopt cloud settings when this PC has no newer local change."""
+        if not settings_row or not isinstance(settings_row.get("payload"), dict):
+            return False
+        s = self.data["settings"]
+        remote_stamp = settings_row.get("updated_at") or ""
+        if remote_stamp and s.get("settings_synced_at") == remote_stamp:
+            return False
+        if not s.get("settings_synced_at") and not self.settings_are_pristine():
+            return False
+        changed = False
+        for key in ("size", "opacity", "behavior", "delay", "checklist", "tray", "font"):
+            if key in settings_row["payload"] and s.get(key) != settings_row["payload"][key]:
+                s[key] = settings_row["payload"][key]
+                changed = True
+        s["settings_synced_at"] = remote_stamp
+        return changed
+
+    def settings_payload(self) -> dict:
+        s = self.data["settings"]
+        return {k: s.get(k) for k in ("size", "opacity", "behavior", "delay", "checklist", "tray", "font")}
+
+    def sync_now(self, manual: bool = False, initial: bool = False):
+        if getattr(self, "_syncing", False):
+            return
+        client = self.sync_client()
+        if not client.configured:
+            if manual:
+                QMessageBox.information(self, "동기화", "설정에서 Supabase 주소와 anon key를 먼저 입력해 주세요.")
+            return
+        if not client.signed_in:
+            if manual:
+                self.open_login()
+            return
+        self.save_editor()
+        self._syncing = True
+        s = self.data["settings"]
+        # The first sync on a PC adopts what is already in the cloud instead of
+        # overwriting it with this machine's defaults.
+        pull_only = not s.get("settings_initialized")
+        push_settings = None if (pull_only or s.get("settings_synced_at")) else self.settings_payload()
+        worker = SyncCycle(client, self.build_push_rows(), push_settings, None, self,
+                           pull_only=pull_only)
+        worker.completed.connect(lambda rows, srow, pushed, spushed: self.on_sync_done(rows, srow, pushed, spushed, initial))
+        worker.failed.connect(lambda msg: self.on_sync_failed(msg, manual))
+        worker.auth_lost.connect(lambda: save_session({}))
+        worker.finished.connect(lambda: setattr(self, "_syncing", False))
+        self._sync_worker = worker
+        worker.start()
+
+    def settings_are_pristine(self) -> bool:
+        """True when the shared settings are still the stock values."""
+        s = self.data["settings"]
+        for key, value in DEFAULT["settings"].items():
+            if key in ("sync_enabled", "sync_url", "sync_key", "sync_interval", "sync_email"):
+                continue
+            if s.get(key) != value:
+                return False
+        return True
+
+    def notes_are_pristine(self) -> bool:
+        """True when this PC still only holds the untouched starter notes."""
+        notes = self.data.get("notes", [])
+        if not notes or len(notes) > 4:
+            return False
+        for note in notes:
+            text = re.sub(r"<[^>]+>", "", str(note.get("html") or "")).replace("&nbsp;", " ").strip()
+            if text or note.get("attachment"):
+                return False
+        return True
+
+    def on_sync_done(self, rows, settings_row, pushed_rows, pushed_settings, initial: bool):
+        first_pull = not self.data["settings"].get("settings_initialized")
+        self.data["settings"]["settings_initialized"] = True
+        remote_notes = [r for r in (rows or []) if r.get("note_id") and not r.get("deleted")]
+        if first_pull and remote_notes and self.notes_are_pristine():
+            # 아직 아무것도 쓰지 않은 새 설치라면 클라우드 메모로 대체합니다.
+            self.data["notes"] = []
+        if first_pull and not remote_notes:
+            # 클라우드가 비어 있으면 이 PC의 메모를 바로 올립니다.
+            QTimer.singleShot(120, lambda: self.sync_now())
+        self.confirm_pushed(pushed_rows)
+        if pushed_settings and pushed_settings.get("updated_at"):
+            self.data["settings"]["settings_synced_at"] = pushed_settings["updated_at"]
+        changed = self.merge_remote_notes(rows)
+        if not pushed_settings:
+            # 방금 올린 설정을 서버의 이전 값으로 되돌리지 않습니다.
+            changed = self.merge_remote_settings(settings_row) or changed
+        if changed:
+            if self.data["notes"]:
+                self.active = max(0, min(self.active, len(self.data["notes"]) - 1))
+                self.set_note(self.active)
+            self.reposition(); self.update_opacity(); self.refresh_tabs()
+        save_data(self.data)
+        self._sync_status = f"마지막 동기화 {datetime.now().strftime('%H:%M:%S')}"
+        if initial:
+            QMessageBox.information(self, "동기화", "로그인했고 동기화를 시작했습니다.")
+
+    def on_sync_failed(self, message: str, manual: bool):
+        self._sync_status = f"동기화 실패: {message}"
+        if manual:
+            QMessageBox.warning(self, "동기화 실패", message)
+
+    def start_sync_timer(self):
+        if not hasattr(self, "sync_timer"):
+            self.sync_timer = QTimer(self)
+            self.sync_timer.timeout.connect(lambda: self.sync_now())
+        seconds = max(15, int(self.data["settings"].get("sync_interval", 60)))
+        self.sync_timer.stop()
+        if self.data["settings"].get("sync_enabled") and self.sync_client().configured:
+            self.sync_timer.start(seconds * 1000)
+            QTimer.singleShot(1200, lambda: self.sync_now())
     def export_backup(self):
         path,_=QFileDialog.getSaveFileName(self,"백업 내보내기",str(Path.home()/"SideMemo-backup.zip"),"SideMemo 백업 (*.zip)")
         if path:

@@ -1,16 +1,16 @@
 ﻿[Setup]
 AppName=SideMemo
-AppVersion=1.0.5
-AppVerName=SideMemo 1.0.5
+AppVersion=1.0.6
+AppVerName=SideMemo 1.0.6
 AppPublisher=SideMemo
-AppPublisherURL=https://github.com/yuldaewoorim/SideMemo
-AppSupportURL=https://github.com/yuldaewoorim/SideMemo
-AppUpdatesURL=https://github.com/yuldaewoorim/SideMemo/releases
+AppPublisherURL=https://github.com/wxo1m/SideMemo
+AppSupportURL=https://github.com/wxo1m/SideMemo
+AppUpdatesURL=https://github.com/wxo1m/SideMemo/releases
 VersionInfoCompany=SideMemo
 VersionInfoDescription=SideMemo Setup
 VersionInfoProductName=SideMemo
-VersionInfoProductVersion=1.0.5
-VersionInfoVersion=1.0.5.0
+VersionInfoProductVersion=1.0.6
+VersionInfoVersion=1.0.6.0
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
 DefaultDirName={localappdata}\Programs\SideMemo

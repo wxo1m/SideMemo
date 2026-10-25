@@ -1,7 +1,7 @@
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 0, 5, 0),
-    prodvers=(1, 0, 5, 0),
+    filevers=(1, 0, 6, 0),
+    prodvers=(1, 0, 6, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -15,12 +15,12 @@ VSVersionInfo(
         '040904B0',
         [StringStruct('CompanyName', 'SideMemo'),
          StringStruct('FileDescription', 'SideMemo - 화면 가장자리 메모'),
-         StringStruct('FileVersion', '1.0.5.0'),
+         StringStruct('FileVersion', '1.0.6.0'),
          StringStruct('InternalName', 'SideMemo'),
          StringStruct('LegalCopyright', 'Copyright (C) 2026 SideMemo. All rights reserved.'),
          StringStruct('OriginalFilename', 'SideMemo.exe'),
          StringStruct('ProductName', 'SideMemo'),
-         StringStruct('ProductVersion', '1.0.5.0')])
+         StringStruct('ProductVersion', '1.0.6.0')])
     ]),
     VarFileInfo([VarStruct('Translation', [1042, 1200])])
   ]
