@@ -1,0 +1,181 @@
+180:         return val == 0
+181:     except Exception:
+182:         return False
+183: 
+184: 
+185: def get_style() -> str:
+186:     return STYLE_DARK if is_dark_mode() else STYLE
+187: 
+188: 
+189: def get_app_icon() -> QIcon:
+190:     if ICON_PATH.is_file():
+191:         return QIcon(str(ICON_PATH))
+192:     cand = Path(sys.executable).parent / "app.ico"
+193:     if cand.is_file():
+194:         return QIcon(str(cand))
+195:     return QApplication.style().standardIcon(QStyle.StandardPixmap.SP_FileIcon)
+196: 
+197: 
+198: def data_path():
+199:     DATA_DIR.mkdir(parents=True, exist_ok=True); ATTACH_DIR.mkdir(parents=True, exist_ok=True)
+200: 
+201: 
+202: def load_data():
+203:     data_path()
+204:     try:
+205:         with DATA_FILE.open(encoding="utf-8") as f:
+206:             data = json.load(f)
+207:     except (FileNotFoundError, json.JSONDecodeError):
+208:         data = json.loads(json.dumps(DEFAULT))
+209:     for note in data.get("notes", []):
+210:         if note.get("theme") == "커스텀" and "custom_color" in note:
+211:             cc = note["custom_color"]
+212:             if isinstance(cc, (list, tuple)) and len(cc) == 2:
+213:                 THEMES["커스텀"] = (str(cc[0]), str(cc[1]))
+214:     return data
+215: 
+216: 
+217: def save_data(data):
+218:     data_path(); DATA_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+219: 
+220: 
+221: def parse_version(v: str) -> tuple[int, ...]:
+222:     nums = re.findall(r'\d+', str(v))
+223:     return tuple(int(x) for x in nums) if nums else (0, 0, 0)
+224: 
+225: 
+226: class UpdateCheckWorker(QThread):
+227:     update_available = Signal(str, str, str, int)
+228:     already_latest = Signal(str)
+229:     check_failed = Signal(str)
+230: 
+231:     def run(self):
+232:         latest_tag = ""
+233:         release_notes = ""
+234:         download_url = ""
+235:         asset_size = 0
+236:         found_update = False
+237:         v_ok = False
+238:         r_ok = False
+239:         last_err = ""
+240: 
+241:         # 1. Check version.json from GitHub raw URL (always accessible, carries custom release_notes)
+242:         try:
+243:             v_url = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/version.json"
+244:             v_req = urllib.request.Request(v_url, headers={
+245:                 "User-Agent": f"SideMemo-App/{APP_VERSION}",
+246:                 "Cache-Control": "no-cache"
+247:             })
+248:             with urllib.request.urlopen(v_req, timeout=5) as resp:
+249:                 if resp.status == 200:
+250:                     v_data = json.loads(resp.read().decode("utf-8"))
+251:                     v_ver = v_data.get("version", "").strip()
+252:                     v_notes = v_data.get("release_notes", "").strip()
+253:                     v_dl = v_data.get("download_url", "").strip()
+254:                     v_ok = True
+255:                     if parse_version(v_ver) > parse_version(APP_VERSION):
+256:                         latest_tag = f"v{v_ver}" if not v_ver.startswith("v") else v_ver
+257:                         release_notes = v_notes
+258:                         download_url = v_dl or f"https://github.com/{GITHUB_REPO}/releases/download/{latest_tag}/SideMemo-Setup.exe"
+259:                         found_update = True
+260:         except Exception as e:
+261:             last_err = str(e)
+262: 
+263:         # 2. Check GitHub Releases API
+264:         try:
+265:             r_url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+266:             r_req = urllib.request.Request(r_url, headers={
+267:                 "User-Agent": f"SideMemo-App/{APP_VERSION}",
+268:                 "Accept": "application/vnd.github.v3+json"
+269:             })
+270:             with urllib.request.urlopen(r_req, timeout=5) as resp:
+271:                 if resp.status == 200:
+272:                     r_data = json.loads(resp.read().decode("utf-8"))
+273:                     r_tag = r_data.get("tag_name", "").strip()
+274:                     r_body = r_data.get("body", "").strip()
+275:                     r_ok = True
+276:                     if parse_version(r_tag) > parse_version(APP_VERSION):
+277:                         latest_tag = r_tag
+278:                         if r_body and not release_notes:
+279:                             release_notes = r_body
+280:                         for asset in r_data.get("assets", []):
+281:                             if asset.get("name", "").lower().endswith(".exe"):
+282:                                 download_url = asset.get("browser_download_url", download_url)
+283:                                 asset_size = asset.get("size", 0)
+284:                                 break
+285:                         found_update = True
+286:         except Exception as e:
+287:             if not last_err:
+288:                 last_err = str(e)
+289: 
+290:         if found_update:
+291:             if not release_notes:
+292:                 release_notes = "새로운 기능 및 안정성 개선이 포함되어 있습니다."
+293:             if not download_url:
+294:                 download_url = f"https://github.com/{GITHUB_REPO}/releases/download/{latest_tag}/SideMemo-Setup.exe"
+295:             self.update_available.emit(latest_tag, release_notes, download_url, asset_size)
+296:         elif v_ok or r_ok:
+297:             self.already_latest.emit(APP_VERSION)
+298:         else:
+299:             self.check_failed.emit(last_err or "네트워크 연결 또는 배포 릴리스 확인")
+300: 
+301: 
+302: class DownloadWorker(QThread):
+303:     progress = Signal(int)
+304:     finished = Signal(str)
+305:     error = Signal(str)
+306: 
+307:     def __init__(self, download_url: str, tag_name: str, parent=None):
+308:         super().__init__(parent)
+309:         self.download_url = download_url
+310:         self.tag_name = tag_name
+311: 
+312:     def run(self):
+313:         try:
+314:             temp_dir = tempfile.gettempdir()
+315:             clean_tag = self.tag_name.lstrip("vV")
+316:             target_file = os.path.join(temp_dir, f"SideMemo-Setup-{clean_tag}.exe")
+317:             urls = [self.download_url]
+318:             fallback_url = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/installer/SideMemo-Setup.exe"
+319:             if fallback_url not in urls:
+320:                 urls.append(fallback_url)
+321: 
+322:             success = False
+323:             last_err = None
+324:             for u in urls:
+325:                 if not u:
+326:                     continue
+327:                 try:
+328:                     req = urllib.request.Request(u, headers={
+329:                         "User-Agent": f"SideMemo-App/{APP_VERSION}"
+330:                     })
+331:                     with urllib.request.urlopen(req, timeout=45) as resp, open(target_file, "wb") as f:
+332:                         total_size = int(resp.headers.get("content-length", 0))
+333:                         downloaded = 0
+334:                         block_size = 65536
+335:                         while True:
+336:                             chunk = resp.read(block_size)
+337:                             if not chunk:
+338:                                 break
+339:                             f.write(chunk)
+340:                             downloaded += len(chunk)
+341:                             if total_size > 0:
+342:                                 self.progress.emit(int((downloaded / total_size) * 100))
+343:                     if os.path.exists(target_file) and os.path.getsize(target_file) > 500000:
+344:                         success = True
+345:                         break
+346:                 except Exception as e:
+347:                     last_err = e
+348: 
+349:             if success:
+350:                 self.finished.emit(target_file)
+351:             else:
+352:                 self.error.emit(str(last_err or "다운로드에 실패했습니다."))
+353:         except Exception as e:
+354:             self.error.emit(str(e))
+355: 
+356: 
+357: class UpdateDialog(QDialog):
+358:     def __init__(self, tag_name: str, notes: str, download_url: str, asset_size: int, parent=None):
+359:         super().__init__(parent)
+360:         self.download_url = download_url

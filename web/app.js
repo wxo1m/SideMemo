@@ -7,7 +7,8 @@
 (function () {
   "use strict";
 
-  var CFG = window.SIDEMEMO_CONFIG || {};
+  var FILE_CFG = window.SIDEMEMO_CONFIG || {};
+  var CFG = storedConfig() || FILE_CFG;
   var NOTES_TABLE = "sidememo_notes";
   var SETTINGS_TABLE = "sidememo_settings";
   var PUSH_DELAY = 800;
@@ -29,8 +30,27 @@
     dlg: $("login-dialog"), email: $("email"), password: $("password"),
     loginErr: $("login-error"), signinBtn: $("signin-btn"),
     signupBtn: $("signup-btn"), closeDlg: $("close-dialog"),
-    fontSize: $("font-size"), checkBtn: $("check-btn"), toolbar: $("toolbar")
+    fontSize: $("font-size"), checkBtn: $("check-btn"), toolbar: $("toolbar"),
+    connBtn: $("conn-btn"), connDlg: $("conn-dialog"), connUrl: $("cfg-url"),
+    connKey: $("cfg-key"), connErr: $("cfg-error"), connSave: $("cfg-save"),
+    connClose: $("cfg-close")
   };
+
+  /* 연결 설정은 이 브라우저에만 저장합니다. */
+  function storedConfig() {
+    try {
+      var raw = localStorage.getItem("sidememo-config");
+      if (!raw) return null;
+      var parsed = JSON.parse(raw);
+      if (parsed && parsed.supabaseUrl && parsed.supabaseAnonKey) return parsed;
+    } catch (e) {}
+    return null;
+  }
+
+  function saveConfig(url, key) {
+    try { localStorage.setItem("sidememo-config", JSON.stringify({ supabaseUrl: url, supabaseAnonKey: key })); }
+    catch (e) {}
+  }
 
   var db = null;
   var user = null;
@@ -421,6 +441,9 @@
 
   /* ------------------------------------------------------------------ 초기화 */
   function bindUi() {
+    ui.connBtn.addEventListener("click", openConnDialog);
+    ui.connSave.addEventListener("click", saveConn);
+    ui.connClose.addEventListener("click", function () { ui.connDlg.close(); });
     ui.title.addEventListener("input", function () {
       if (noteFromEditor()) { renderRail(); schedulePush(); }
     });
@@ -491,29 +514,7 @@
     window.addEventListener("beforeunload", flushEdits);
   }
 
-  function init() {
-    try {
-      if (localStorage.getItem("sidememo-theme") === "dark") {
-        document.body.classList.add("dark");
-        ui.themeBtn.textContent = "라이트 모드";
-      }
-    } catch (e) {}
-    bindUi();
-    notes = [blankNote(0)];
-    active = 0;
-    renderAccount();
-    render();
-
-    if (!CFG.supabaseUrl || !CFG.supabaseAnonKey) {
-      ui.ver.textContent = "설정 필요";
-      setStatus("web/config.js 에 Supabase 주소와 anon key를 입력해 주세요.", true);
-      return;
-    }
-    if (!window.supabase || !window.supabase.createClient) {
-      ui.ver.textContent = "오프라인";
-      setStatus("Supabase 라이브러리를 불러오지 못했습니다. 인터넷 연결을 확인해 주세요.", true);
-      return;
-    }
+  function connectDb() {
     db = window.supabase.createClient(CFG.supabaseUrl, CFG.supabaseAnonKey);
     ui.ver.textContent = "웹 " + (CFG.version || "1.0.6");
     db.auth.getSession().then(function (res) {
@@ -531,6 +532,55 @@
         else if (!next) { renderAccount(); }
       }, 0);
     });
+  }
+
+  function openConnDialog() {
+    ui.connErr.classList.add("hidden");
+    ui.connUrl.value = CFG.supabaseUrl || "";
+    ui.connKey.value = CFG.supabaseAnonKey || "";
+    ui.connDlg.showModal();
+  }
+
+  function saveConn() {
+    var url = (ui.connUrl.value || "").trim().replace(/\/+$/, "");
+    var key = (ui.connKey.value || "").trim();
+    if (!url || !key) {
+      ui.connErr.textContent = "주소와 anon key를 모두 입력해 주세요.";
+      ui.connErr.classList.remove("hidden");
+      return;
+    }
+    saveConfig(url, key);
+    CFG = { supabaseUrl: url, supabaseAnonKey: key, version: "1.0.6" };
+    ui.connDlg.close();
+    setStatus("연결 정보를 저장했습니다. 새로 고치는 중…");
+    setTimeout(function () { window.location.reload(); }, 400);
+  }
+
+  function init() {
+    try {
+      if (localStorage.getItem("sidememo-theme") === "dark") {
+        document.body.classList.add("dark");
+        ui.themeBtn.textContent = "라이트 모드";
+      }
+    } catch (e) {}
+    bindUi();
+    notes = [blankNote(0)];
+    active = 0;
+    renderAccount();
+    render();
+
+    if (!CFG.supabaseUrl || !CFG.supabaseAnonKey) {
+      ui.ver.textContent = "설정 필요";
+      setStatus("오른쪽 위의 [연결 설정]을 눌러 Supabase 주소와 anon key를 입력해 주세요.", true);
+      openConnDialog();
+      return;
+    }
+    if (!window.supabase || !window.supabase.createClient) {
+      ui.ver.textContent = "오프라인";
+      setStatus("Supabase 라이브러리를 불러오지 못했습니다. 인터넷 연결을 확인해 주세요.", true);
+      return;
+    }
+    connectDb();
   }
 
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
