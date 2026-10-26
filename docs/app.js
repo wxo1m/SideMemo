@@ -367,10 +367,14 @@
     pullSettings()
       .then(function () { return pullAll(); })
       .then(function () {
-        if (!notes.length) notes.push(blankNote(0));
+        if (!notes.length) {
+          notes.push(blankNote(0));
+          active = 0;
+          render();
+          return pushDirty();
+        }
         if (active < 0 || active >= notes.length) active = 0;
         render();
-        return pushDirty();
       })
       .then(subscribe)
       .then(function () { setStatus("로그인했습니다 · " + now()); })
@@ -564,18 +568,24 @@
       }
     } catch (e) {}
     bindUi();
-    notes = [blankNote(0)];
-    active = 0;
+    notes = [];
+    active = -1;
     renderAccount();
     render();
 
     if (!CFG.supabaseUrl || !CFG.supabaseAnonKey) {
+      notes = [blankNote(0)];
+      active = 0;
+      render();
       ui.ver.textContent = "설정 필요";
       setStatus("오른쪽 위의 [연결 설정]을 눌러 Supabase 주소와 anon key를 입력해 주세요.", true);
       openConnDialog();
       return;
     }
     if (!window.supabase || !window.supabase.createClient) {
+      notes = [blankNote(0)];
+      active = 0;
+      render();
       ui.ver.textContent = "오프라인";
       setStatus("Supabase 라이브러리를 불러오지 못했습니다. 인터넷 연결을 확인해 주세요.", true);
       return;
