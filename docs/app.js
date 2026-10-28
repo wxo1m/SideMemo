@@ -540,8 +540,8 @@
 
   function openConnDialog() {
     ui.connErr.classList.add("hidden");
-    ui.connUrl.value = CFG.supabaseUrl || "";
-    ui.connKey.value = CFG.supabaseAnonKey || "";
+    ui.connUrl.value = (CFG && CFG.supabaseUrl) || (FILE_CFG && FILE_CFG.supabaseUrl) || "";
+    ui.connKey.value = (CFG && CFG.supabaseAnonKey) || (FILE_CFG && FILE_CFG.supabaseAnonKey) || "";
     ui.connDlg.showModal();
   }
 
@@ -561,6 +561,9 @@
   }
 
   function init() {
+    if (!CFG || !CFG.supabaseUrl || !CFG.supabaseAnonKey) {
+      CFG = FILE_CFG;
+    }
     try {
       if (localStorage.getItem("sidememo-theme") === "dark") {
         document.body.classList.add("dark");

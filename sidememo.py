@@ -46,6 +46,8 @@ from sidememo_sync import SyncError, SupabaseClient
 APP_NAME = "SideMemo"
 APP_VERSION = "1.0.7"
 GITHUB_REPO = "wxo1m/SideMemo"
+DEFAULT_SYNC_URL = "https://ztabepbxljzsojsefhis.supabase.co"
+DEFAULT_SYNC_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inp0YWJlcGJ4bGp6c29qc2VmaGlzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTI5MjU0NzEsImV4cCI6MjEwODUwMTQ3MX0.bHZXXfl8ROU6-dsprD1aLqteTx7ZEqKA_57o7Etap1M"
 BASE_DIR = Path(__file__).resolve().parent
 ICON_PATH = BASE_DIR / "app.ico"
 DATA_DIR = Path(QStandardPaths.writableLocation(QStandardPaths.AppDataLocation))
@@ -83,7 +85,7 @@ DIMENSIONS = {
 TAB_WIDTH = 46
 DEFAULT = {"settings": {"position": "오른쪽", "size": "360×360 (기본)", "opacity": 100,
     "behavior": "마우스 조작", "delay": 0.3, "checklist": True, "tray": True, "autostart": False, "font": "맑은 고딕",
-    "sync_enabled": False, "sync_url": "", "sync_key": "", "sync_interval": 60},
+    "sync_enabled": False, "sync_url": DEFAULT_SYNC_URL, "sync_key": DEFAULT_SYNC_KEY, "sync_interval": 60},
     "notes": [{"id": "note1", "title": "NOTE 1", "theme": "노랑", "font": "맑은 고딕", "font_size": 18, "tab_slot": "1번 칸", "html": "", "attachment": ""},
     {"id": "note2", "title": "NOTE 2", "theme": "초록", "font": "맑은 고딕", "font_size": 16, "tab_slot": "2번 칸", "html": "", "attachment": ""},
     {"id": "note3", "title": "NOTE 3", "theme": "파랑", "font": "맑은 고딕", "font_size": 16, "tab_slot": "3번 칸", "html": "", "attachment": ""}],
@@ -998,6 +1000,10 @@ class SideMemo(QMainWindow):
         self.data["settings"].pop("monitor", None)
         self.data["settings"].pop("toggle", None)
         self.data["settings"].pop("spell", None)
+        if not self.data["settings"].get("sync_url"):
+            self.data["settings"]["sync_url"] = DEFAULT_SYNC_URL
+        if not self.data["settings"].get("sync_key"):
+            self.data["settings"]["sync_key"] = DEFAULT_SYNC_KEY
 
     def arrange_side(self):
         self.root_layout.removeWidget(self.page); self.root_layout.removeWidget(self.tab_view)
