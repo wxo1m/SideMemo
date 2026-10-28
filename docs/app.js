@@ -7,8 +7,7 @@
 (function () {
   "use strict";
 
-  var FILE_CFG = window.SIDEMEMO_CONFIG || {};
-  var CFG = storedConfig() || FILE_CFG;
+  var CFG = window.SIDEMEMO_CONFIG || {};
   var NOTES_TABLE = "sidememo_notes";
   var SETTINGS_TABLE = "sidememo_settings";
   var PUSH_DELAY = 800;
@@ -31,26 +30,7 @@
     loginErr: $("login-error"), signinBtn: $("signin-btn"),
     signupBtn: $("signup-btn"), closeDlg: $("close-dialog"),
     fontSize: $("font-size"), checkBtn: $("check-btn"), toolbar: $("toolbar"),
-    connBtn: $("conn-btn"), connDlg: $("conn-dialog"), connUrl: $("cfg-url"),
-    connKey: $("cfg-key"), connErr: $("cfg-error"), connSave: $("cfg-save"),
-    connClose: $("cfg-close")
   };
-
-  /* 연결 설정은 이 브라우저에만 저장합니다. */
-  function storedConfig() {
-    try {
-      var raw = localStorage.getItem("sidememo-config");
-      if (!raw) return null;
-      var parsed = JSON.parse(raw);
-      if (parsed && parsed.supabaseUrl && parsed.supabaseAnonKey) return parsed;
-    } catch (e) {}
-    return null;
-  }
-
-  function saveConfig(url, key) {
-    try { localStorage.setItem("sidememo-config", JSON.stringify({ supabaseUrl: url, supabaseAnonKey: key })); }
-    catch (e) {}
-  }
 
   var db = null;
   var user = null;
@@ -445,9 +425,6 @@
 
   /* ------------------------------------------------------------------ 초기화 */
   function bindUi() {
-    ui.connBtn.addEventListener("click", openConnDialog);
-    ui.connSave.addEventListener("click", saveConn);
-    ui.connClose.addEventListener("click", function () { ui.connDlg.close(); });
     ui.title.addEventListener("input", function () {
       if (noteFromEditor()) { renderRail(); schedulePush(); }
     });
@@ -538,32 +515,7 @@
     });
   }
 
-  function openConnDialog() {
-    ui.connErr.classList.add("hidden");
-    ui.connUrl.value = (CFG && CFG.supabaseUrl) || (FILE_CFG && FILE_CFG.supabaseUrl) || "";
-    ui.connKey.value = (CFG && CFG.supabaseAnonKey) || (FILE_CFG && FILE_CFG.supabaseAnonKey) || "";
-    ui.connDlg.showModal();
-  }
-
-  function saveConn() {
-    var url = (ui.connUrl.value || "").trim().replace(/\/+$/, "");
-    var key = (ui.connKey.value || "").trim();
-    if (!url || !key) {
-      ui.connErr.textContent = "주소와 anon key를 모두 입력해 주세요.";
-      ui.connErr.classList.remove("hidden");
-      return;
-    }
-    saveConfig(url, key);
-    CFG = { supabaseUrl: url, supabaseAnonKey: key, version: "1.0.6" };
-    ui.connDlg.close();
-    setStatus("연결 정보를 저장했습니다. 새로 고치는 중…");
-    setTimeout(function () { window.location.reload(); }, 400);
-  }
-
   function init() {
-    if (!CFG || !CFG.supabaseUrl || !CFG.supabaseAnonKey) {
-      CFG = FILE_CFG;
-    }
     try {
       if (localStorage.getItem("sidememo-theme") === "dark") {
         document.body.classList.add("dark");
@@ -580,9 +532,8 @@
       notes = [blankNote(0)];
       active = 0;
       render();
-      ui.ver.textContent = "설정 필요";
-      setStatus("오른쪽 위의 [연결 설정]을 눌러 Supabase 주소와 anon key를 입력해 주세요.", true);
-      openConnDialog();
+      ui.ver.textContent = "오류";
+      setStatus("Supabase 연결 정보가 설정되어 있지 않습니다.", true);
       return;
     }
     if (!window.supabase || !window.supabase.createClient) {
