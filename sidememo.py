@@ -44,7 +44,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QColorDialog, QComboBox,
 from sidememo_sync import SyncError, SupabaseClient
 
 APP_NAME = "SideMemo"
-APP_VERSION = "1.0.7"
+APP_VERSION = "1.0.8"
 GITHUB_REPO = "wxo1m/SideMemo"
 DEFAULT_SYNC_URL = "https://ztabepbxljzsojsefhis.supabase.co"
 DEFAULT_SYNC_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inp0YWJlcGJ4bGp6c29qc2VmaGlzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTI5MjU0NzEsImV4cCI6MjEwODUwMTQ3MX0.bHZXXfl8ROU6-dsprD1aLqteTx7ZEqKA_57o7Etap1M"

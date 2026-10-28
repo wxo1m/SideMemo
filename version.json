@@ -1,1 +1,1 @@
-{"version": "1.0.7", "repository": "wxo1m/SideMemo", "release_notes": "GitHub Pre-release(시험판) 버전은 자동 업데이트 알림에서 제외하도록 개선했습니다."}
+{"version": "1.0.8", "prerelease": true, "repository": "wxo1m/SideMemo", "release_notes": "기본 Supabase 접속 정보를 앱에 내장하여 별도 주소/키 입력 없이 바로 로그인하여 사용할 수 있도록 개선했습니다."}
