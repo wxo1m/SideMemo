@@ -26,6 +26,10 @@ class SyncError(Exception):
     """Raised when Supabase rejects a request or the network is unreachable."""
 
 
+class AuthExpiredError(SyncError):
+    """The session can no longer authenticate requests."""
+
+
 def normalize_url(url: str) -> str:
     return (url or "").strip().rstrip("/")
 
@@ -33,10 +37,21 @@ def normalize_url(url: str) -> str:
 class SupabaseClient:
     """Small REST client for the two Supabase endpoints SideMemo needs."""
 
-    def __init__(self, url: str = "", anon_key: str = "", session: dict | None = None):
+    def __init__(self, url: str = "", anon_key: str = "", session: dict | None = None,
+                 on_session_changed=None):
         self.url = normalize_url(url)
         self.anon_key = (anon_key or "").strip()
         self.session = dict(session or {})
+        self.on_session_changed = on_session_changed
+
+    def _persist_session(self):
+        if self.on_session_changed:
+            self.on_session_changed(dict(self.session))
+
+    def _expire_session(self):
+        self.session = {}
+        self._persist_session()
+        raise AuthExpiredError("로그인 정보가 만료되었습니다. 다시 로그인해 주세요.")
 
     # ------------------------------------------------------------------ core
     @property
@@ -77,6 +92,11 @@ class SupabaseClient:
             with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
                 raw = response.read().decode("utf-8")
         except urllib.error.HTTPError as exc:
+            if (path == "/auth/v1/token" and (params or {}).get("grant_type") == "refresh_token"
+                    and exc.code in (400, 401, 403)):
+                self._expire_session()
+            if path.startswith("/rest/v1/") and exc.code == 401:
+                self._expire_session()
             raise SyncError(self._describe_http_error(exc)) from None
         except urllib.error.URLError as exc:
             raise SyncError(f"네트워크에 연결하지 못했습니다 ({exc.reason}).") from None
@@ -103,7 +123,7 @@ class SupabaseClient:
                 detail = str(payload["error_code"])
         friendly = {
             400: "요청이 올바르지 않습니다",
-            401: "이메일 또는 비밀번호가 올바르지 않습니다",
+            401: "인증에 실패했습니다",
             403: "권한이 없습니다",
             404: "테이블을 찾을 수 없습니다 (SQL 설정을 실행했는지 확인해 주세요)",
             409: "이미 존재하는 계정입니다",
@@ -111,6 +131,8 @@ class SupabaseClient:
             429: "요청이 너무 많습니다. 잠시 후 다시 시도해 주세요",
         }
         base = friendly.get(exc.code, f"서버 오류 ({exc.code})")
+        if "invalid login credentials" in detail.lower():
+            base = "이메일 또는 비밀번호가 올바르지 않습니다"
         return f"{base} - {detail}" if detail else base
 
     # ------------------------------------------------------------------ auth
@@ -124,6 +146,7 @@ class SupabaseClient:
             "user_id": user.get("id", self.session.get("user_id", "")),
             "email": user.get("email") or email or self.session.get("email", ""),
         }
+        self._persist_session()
         return self.session
 
     def sign_up(self, email: str, password: str) -> dict:
@@ -144,13 +167,12 @@ class SupabaseClient:
     def refresh(self) -> dict:
         refresh_token = self.session.get("refresh_token")
         if not refresh_token:
-            raise SyncError("다시 로그인해 주세요.")
+            self._expire_session()
         payload = self._call("POST", "/auth/v1/token",
                              params={"grant_type": "refresh_token"},
                              body={"refresh_token": refresh_token})
         if not payload or not payload.get("access_token"):
-            self.session = {}
-            raise SyncError("로그인 정보가 만료되었습니다. 다시 로그인해 주세요.")
+            self._expire_session()
         return self._store_session(payload, self.email)
 
     def sign_out(self):
@@ -161,17 +183,15 @@ class SupabaseClient:
             except SyncError:
                 pass
         self.session = {}
+        self._persist_session()
 
     def token(self) -> str | None:
         access_token = self.session.get("access_token")
         if not access_token:
-            return None
+            self._expire_session()
         expires_at = float(self.session.get("expires_at") or 0)
-        if expires_at and time.time() > expires_at - 60:
-            try:
-                self.refresh()
-            except SyncError:
-                return self.session.get("access_token")
+        if not expires_at or time.time() > expires_at - 60:
+            self.refresh()
         return self.session.get("access_token")
 
     # ------------------------------------------------------------------ data

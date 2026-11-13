@@ -41,7 +41,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QColorDialog, QComboBox,
     QFrame, QGraphicsOpacityEffect, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QProgressBar, QPushButton,
     QScrollArea, QSizePolicy, QSlider, QSpinBox, QStyle, QSystemTrayIcon, QTextEdit, QToolButton, QVBoxLayout, QWidget)
 
-from sidememo_sync import SyncError, SupabaseClient
+from sidememo_sync import AuthExpiredError, SyncError, SupabaseClient
 
 APP_NAME = "SideMemo"
 APP_VERSION = "1.0.8"
@@ -119,9 +119,11 @@ def load_session() -> dict:
 def save_session(session: dict) -> None:
     try:
         data_path()
-        SESSION_FILE.write_text(json.dumps(session, ensure_ascii=False, indent=2), encoding="utf-8")
-    except OSError:
-        pass
+        temporary = SESSION_FILE.with_suffix(".tmp")
+        temporary.write_text(json.dumps(session, ensure_ascii=False, indent=2), encoding="utf-8")
+        temporary.replace(SESSION_FILE)
+    except OSError as exc:
+        raise SyncError("로그인 정보를 저장하지 못했습니다. 저장 공간과 파일 권한을 확인해 주세요.") from exc
 
 STYLE = """
 QWidget { color:#242a38; }
@@ -501,7 +503,7 @@ class SyncCycle(QThread):
             self.completed.emit(rows, settings_row, pushed_rows or [], pushed_settings)
         except SyncError as exc:
             message = str(exc)
-            if "다시 로그인" in message or "만료" in message or "로그인 정보" in message:
+            if isinstance(exc, AuthExpiredError):
                 self.auth_lost.emit()
             self.failed.emit(message)
         except Exception as exc:  # pragma: no cover - defensive
@@ -1142,7 +1144,8 @@ class SideMemo(QMainWindow):
     def sync_client(self) -> SupabaseClient:
         s = self.data["settings"]
         if getattr(self, "_sync_client", None) is None:
-            self._sync_client = SupabaseClient(s.get("sync_url", ""), s.get("sync_key", ""), load_session())
+            self._sync_client = SupabaseClient(s.get("sync_url", ""), s.get("sync_key", ""), load_session(),
+                                               on_session_changed=save_session)
         else:
             self._sync_client.url = (s.get("sync_url", "") or "").strip().rstrip("/")
             self._sync_client.anon_key = (s.get("sync_key", "") or "").strip()
@@ -1355,7 +1358,6 @@ class SideMemo(QMainWindow):
                            pull_only=pull_only)
         worker.completed.connect(lambda rows, srow, pushed, spushed: self.on_sync_done(rows, srow, pushed, spushed, initial))
         worker.failed.connect(lambda msg: self.on_sync_failed(msg, manual))
-        worker.auth_lost.connect(lambda: save_session({}))
         worker.finished.connect(lambda: setattr(self, "_syncing", False))
         self._sync_worker = worker
         worker.start()
