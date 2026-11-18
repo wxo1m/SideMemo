@@ -1,6 +1,7 @@
 """SideMemo: a Windows edge note utility inspired by the supplied reference UI."""
 from __future__ import annotations
 import ctypes
+import copy
 import ctypes.wintypes
 from datetime import datetime, timezone
 import json
@@ -36,12 +37,14 @@ if getattr(sys, "frozen", False):
 
 from PySide6.QtCore import QEvent, QPoint, QStandardPaths, Qt, QTimer, QThread, Signal
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
-from PySide6.QtGui import QAction, QColor, QCursor, QFont, QIcon, QKeySequence, QPixmap, QTextCharFormat, QTextCursor, QTextListFormat
+from PySide6.QtGui import QAction, QColor, QCursor, QFont, QIcon, QKeySequence, QPixmap, QTextCharFormat, QTextCursor, QTextDocument, QTextListFormat
 from PySide6.QtWidgets import (QApplication, QCheckBox, QColorDialog, QComboBox, QDialog, QDoubleSpinBox, QFileDialog, QFontComboBox,
     QFrame, QGraphicsOpacityEffect, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QProgressBar, QPushButton,
     QScrollArea, QSizePolicy, QSlider, QSpinBox, QStyle, QSystemTrayIcon, QTextEdit, QToolButton, QVBoxLayout, QWidget)
 
 from sidememo_sync import AuthExpiredError, SyncError, SupabaseClient
+
+from sidememo_storage import atomic_json, read_data, restore_backup, write_backup, RECOVERY_NOTICES
 
 APP_NAME = "SideMemo"
 APP_VERSION = "1.0.8"
@@ -119,9 +122,7 @@ def load_session() -> dict:
 def save_session(session: dict) -> None:
     try:
         data_path()
-        temporary = SESSION_FILE.with_suffix(".tmp")
-        temporary.write_text(json.dumps(session, ensure_ascii=False, indent=2), encoding="utf-8")
-        temporary.replace(SESSION_FILE)
+        atomic_json(SESSION_FILE, session, keep_backup=False)
     except OSError as exc:
         raise SyncError("로그인 정보를 저장하지 못했습니다. 저장 공간과 파일 권한을 확인해 주세요.") from exc
 
@@ -205,11 +206,29 @@ def data_path():
 
 def load_data():
     data_path()
-    try:
-        with DATA_FILE.open(encoding="utf-8") as f:
-            data = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        data = json.loads(json.dumps(DEFAULT))
+    data = read_data(DATA_FILE, DEFAULT)
+    import hashlib
+    session = load_session()
+    url = data.get("settings", {}).get("sync_url") or DEFAULT_SYNC_URL
+    scope = hashlib.sha256((url.strip().rstrip("/") + "|" + str(session.get("user_id", ""))).encode()).hexdigest() if session.get("access_token") and session.get("user_id") else "local"
+    owner = data.get("account_scope")
+    if owner != scope:
+        profiles = DATA_DIR / "accounts"
+        profiles.mkdir(parents=True, exist_ok=True)
+        # Old installations did not record an owner. Preserve, never auto-upload.
+        archive_name = owner if isinstance(owner, str) and re.fullmatch(r"local|[0-9a-f]{64}", owner) else "legacy-unassigned-" + uuid.uuid4().hex
+        atomic_json(profiles / (archive_name + ".json"), data)
+        target = profiles / (scope + ".json")
+        if target.exists():
+            data = read_data(target, DEFAULT)
+        else:
+            previous_settings = data.get("settings", {})
+            data = json.loads(json.dumps(DEFAULT))
+            for key in ("sync_url", "sync_key"):
+                data["settings"][key] = previous_settings.get(key) or DEFAULT["settings"][key]
+        data["account_scope"] = scope
+        data["settings"]["sync_enabled"] = scope != "local"
+        save_data(data)
     for note in data.get("notes", []):
         if note.get("theme") == "커스텀" and "custom_color" in note:
             cc = note["custom_color"]
@@ -219,7 +238,20 @@ def load_data():
 
 
 def save_data(data):
-    data_path(); DATA_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    try:
+        data_path()
+        atomic_json(DATA_FILE, data)
+    except OSError:
+        if QApplication.instance():
+            QMessageBox.warning(None, "저장 실패", "메모를 저장하지 못했습니다. 이전 저장본은 보존됩니다.\n저장 공간과 권한을 확인하고 앱을 종료하기 전에 다시 저장해 주세요.")
+        raise
+
+
+def show_recovery_notices(parent=None):
+    if RECOVERY_NOTICES:
+        messages = list(RECOVERY_NOTICES)
+        RECOVERY_NOTICES.clear()
+        QMessageBox.warning(parent, "메모 복구 안내", "\n\n".join(messages))
 
 
 def parse_version(v: str) -> tuple[int, ...]:
@@ -490,14 +522,19 @@ class SyncCycle(QThread):
                  since: str | None, parent=None, pull_only: bool = False):
         super().__init__(parent)
         self.client = client
-        self.push_rows = [] if pull_only else push_rows
-        self.push_settings = None if pull_only else push_settings
+        self.push_rows = [] if pull_only else copy.deepcopy(push_rows)
+        self.push_settings = None if pull_only else copy.deepcopy(push_settings)
         self.since = since
 
     def run(self):
         try:
             pushed_rows = self.client.push_notes(self.push_rows) if self.push_rows else []
             pushed_settings = self.client.push_settings(self.push_settings) if self.push_settings is not None else None
+            sent = {str(row["note_id"]): row for row in self.push_rows}
+            for row in pushed_rows or []:
+                row["_sent"] = sent.get(str(row.get("note_id")))
+            if pushed_settings:
+                pushed_settings["_sent"] = self.push_settings
             rows = self.client.pull_notes(self.since)
             settings_row = self.client.pull_settings()
             self.completed.emit(rows, settings_row, pushed_rows or [], pushed_settings)
@@ -802,6 +839,7 @@ class SideMemo(QMainWindow):
         QTimer.singleShot(2500, lambda: check_for_updates(parent=self, silent_if_latest=True))
         self._sync_client = None; self._syncing = False; self._sync_since = None; self._sync_status = ""
         QTimer.singleShot(1500, self.start_sync_timer)
+        QTimer.singleShot(0, lambda: show_recovery_notices(self))
 
     def build(self):
         central = QWidget(); central.setStyleSheet("background:transparent;"); self.setCentralWidget(central); self.root_layout = QHBoxLayout(central); self.root_layout.setContentsMargins(0,0,0,0); self.root_layout.setSpacing(0)
@@ -1141,6 +1179,40 @@ class SideMemo(QMainWindow):
     def quit(self): self.save_editor(); self.unregister_hotkey(); QApplication.quit()
 
     # ------------------------------------------------------------- sync/cloud
+    def account_scope(self, client):
+        import hashlib
+        return hashlib.sha256((client.url + "|" + client.user_id).encode()).hexdigest() if client.signed_in else "local"
+
+    def switch_account_data(self, scope):
+        if self.data.get("account_scope", "local") == scope:
+            return
+        self.save_timer.stop()
+        self.save_editor()
+        profiles = DATA_DIR / "accounts"
+        profiles.mkdir(parents=True, exist_ok=True)
+        previous = self.data.get("account_scope", "legacy-unassigned-" + uuid.uuid4().hex)
+        # Never use untrusted backup metadata as a filesystem path.
+        if not isinstance(previous, str) or not re.fullmatch(r"local|[0-9a-f]{64}|legacy-unassigned-[0-9a-f]{32}", previous):
+            previous = "legacy-unassigned-" + uuid.uuid4().hex
+        atomic_json(profiles / (previous + ".json"), self.data)
+        target = profiles / (scope + ".json")
+        if target.exists():
+            replacement = read_data(target, DEFAULT)
+        else:
+            replacement = json.loads(json.dumps(DEFAULT))
+            for key in ("sync_url", "sync_key"):
+                replacement["settings"][key] = self.data["settings"].get(key, "")
+        replacement["account_scope"] = scope
+        save_data(replacement)
+        self.data = replacement
+        self.active = 0
+        self.set_note(0)
+        show_recovery_notices(self)
+
+    def require_idle_auth(self):
+        if getattr(self, "_syncing", False):
+            raise SyncError("동기화가 끝난 뒤 계정을 변경해 주세요.")
+
     def sync_client(self) -> SupabaseClient:
         s = self.data["settings"]
         if getattr(self, "_sync_client", None) is None:
@@ -1152,8 +1224,10 @@ class SideMemo(QMainWindow):
         return self._sync_client
 
     def sync_sign_in(self, email: str, password: str):
+        self.require_idle_auth()
         client = self.sync_client()
         session = client.sign_in(email, password)
+        self.switch_account_data(self.account_scope(client))
         save_session(session)
         self.data["settings"]["sync_enabled"] = True
         self.data["settings"]["sync_email"] = email
@@ -1162,6 +1236,7 @@ class SideMemo(QMainWindow):
         return session
 
     def sync_sign_up(self, email: str, password: str):
+        self.require_idle_auth()
         client = self.sync_client()
         try:
             session = client.sign_up(email, password)
@@ -1169,6 +1244,7 @@ class SideMemo(QMainWindow):
             if "가입 확인 메일" in str(exc):
                 return None
             raise
+        self.switch_account_data(self.account_scope(client))
         save_session(session)
         self.data["settings"]["sync_enabled"] = True
         self.data["settings"]["sync_email"] = email
@@ -1177,15 +1253,20 @@ class SideMemo(QMainWindow):
         return session
 
     def sync_sign_out(self):
+        self.require_idle_auth()
         try:
             self.sync_client().sign_out()
         except SyncError:
             pass
         save_session({})
+        self.switch_account_data("local")
         self.data["settings"]["sync_enabled"] = False
         save_data(self.data)
 
     def open_login(self):
+        if getattr(self, "_syncing", False):
+            QMessageBox.information(self, "계정", "동기화가 끝난 뒤 계정을 변경해 주세요.")
+            return
         if not self.data["settings"].get("sync_url") or not self.data["settings"].get("sync_key"):
             QMessageBox.information(self, "로그인",
                 "먼저 설정 > 동기화에서 Supabase 주소와 anon key를 입력해 주세요.")
@@ -1242,17 +1323,22 @@ class SideMemo(QMainWindow):
 
     def confirm_pushed(self, pushed_rows: list[dict]) -> None:
         """Adopt the server timestamp for rows we just wrote."""
-        by_id = {str(n.get("id")): n for n in self.data.get("notes", [])}
+        by_id = {str(n.get("id")): (i, n) for i, n in enumerate(self.data.get("notes", []))}
         for row in pushed_rows or []:
             note_id = str(row.get("note_id") or "")
             stamp = row.get("updated_at") or ""
             if not note_id or not stamp:
                 continue
-            if row.get("deleted"):
-                self.data.setdefault("tombstones", {})[note_id] = stamp
+            sent = row.get("_sent")
+            if not sent:
                 continue
-            note = by_id.get(note_id)
-            if note is not None:
+            if row.get("deleted"):
+                if sent.get("deleted") and self.data.get("tombstones", {}).get(note_id) is True:
+                    self.data["tombstones"][note_id] = stamp
+                continue
+            position, note = by_id.get(note_id, (-1, None))
+            if (note is not None and not self.data.get("tombstones", {}).get(note_id)
+                    and position == sent.get("position") and self.note_payload(note) == sent.get("payload")):
                 note["synced_at"] = stamp
 
     def merge_remote_notes(self, rows: list[dict]) -> bool:
@@ -1266,10 +1352,14 @@ class SideMemo(QMainWindow):
                 continue
             remote_stamp = row.get("updated_at") or ""
             if row.get("deleted"):
+                if note_id in by_id and not by_id[note_id].get("synced_at"):
+                    continue
                 if note_id in by_id:
                     by_id.pop(note_id)
                     changed = True
                 self.data.setdefault("tombstones", {})[note_id] = remote_stamp or True
+                continue
+            if note_id in self.data.get("tombstones", {}):
                 continue
             local = by_id.get(note_id)
             payload = row.get("payload") or {}
@@ -1347,6 +1437,7 @@ class SideMemo(QMainWindow):
             if manual:
                 self.open_login()
             return
+        self.switch_account_data(self.account_scope(client))
         self.save_editor()
         self._syncing = True
         s = self.data["settings"]
@@ -1378,12 +1469,16 @@ class SideMemo(QMainWindow):
         if not notes or len(notes) > 4:
             return False
         for note in notes:
-            text = re.sub(r"<[^>]+>", "", str(note.get("html") or "")).replace("&nbsp;", " ").strip()
-            if text or note.get("attachment"):
+            document = QTextDocument()
+            document.setHtml(str(note.get("html") or ""))
+            text = document.toPlainText().strip()
+            if text or note.get("attachment") or note.get("attachment_data"):
                 return False
         return True
 
     def on_sync_done(self, rows, settings_row, pushed_rows, pushed_settings, initial: bool):
+        # Capture edits still waiting in the debounce timer before accepting ACKs.
+        self.save_editor()
         first_pull = not self.data["settings"].get("settings_initialized")
         self.data["settings"]["settings_initialized"] = True
         remote_notes = [r for r in (rows or []) if r.get("note_id") and not r.get("deleted")]
@@ -1394,7 +1489,8 @@ class SideMemo(QMainWindow):
             # 클라우드가 비어 있으면 이 PC의 메모를 바로 올립니다.
             QTimer.singleShot(120, lambda: self.sync_now())
         self.confirm_pushed(pushed_rows)
-        if pushed_settings and pushed_settings.get("updated_at"):
+        if (pushed_settings and pushed_settings.get("updated_at")
+                and pushed_settings.get("_sent") == self.settings_payload()):
             self.data["settings"]["settings_synced_at"] = pushed_settings["updated_at"]
         changed = self.merge_remote_notes(rows)
         if not pushed_settings:
@@ -1428,29 +1524,29 @@ class SideMemo(QMainWindow):
         path,_=QFileDialog.getSaveFileName(self,"백업 내보내기",str(Path.home()/"SideMemo-backup.zip"),"SideMemo 백업 (*.zip)")
         if path:
             if not path.lower().endswith(".zip"): path += ".zip"
-            self.save_editor()
-            with zipfile.ZipFile(path,"w",zipfile.ZIP_DEFLATED) as archive:
-                archive.write(DATA_FILE,"sidememo.json")
-                for note in self.data["notes"]:
-                    attachment=Path(note.get("attachment", ""))
-                    if attachment.is_file(): archive.write(attachment,f"attachments/{attachment.name}")
-            QMessageBox.information(self,"백업 완료","메모와 첨부 이미지를 하나의 백업 파일로 저장했습니다.")
+            try:
+                self.save_editor()
+                write_backup(path, self.data)
+                QMessageBox.information(self,"백업 완료","메모와 첨부 이미지를 하나의 백업 파일로 저장했습니다.")
+            except (OSError, ValueError):
+                QMessageBox.warning(self,"백업 실패","메모나 첨부 파일을 읽거나 저장하지 못했습니다. 기존 백업은 유지됩니다.")
     def import_backup(self):
+        if getattr(self, "_syncing", False):
+            QMessageBox.information(self, "백업 가져오기", "동기화가 끝난 뒤 다시 시도해 주세요.")
+            return
         path,_=QFileDialog.getOpenFileName(self,"백업 가져오기","","SideMemo 백업 (*.zip);;이전 JSON 백업 (*.json)")
         if path:
             try:
-                if path.lower().endswith(".zip"):
-                    with zipfile.ZipFile(path) as archive:
-                        candidate=json.loads(archive.read("sidememo.json").decode("utf-8"))
-                        for name in archive.namelist():
-                            if name.startswith("attachments/") and not name.endswith("/"):
-                                target=ATTACH_DIR / Path(name).name
-                                target.write_bytes(archive.read(name))
-                        for note in candidate["notes"]:
-                            if note.get("attachment"): note["attachment"]=str(ATTACH_DIR / Path(note["attachment"]).name)
-                else: candidate=json.loads(Path(path).read_text(encoding="utf-8"))
-                assert "notes" in candidate; self.data=candidate; save_data(self.data); self.set_note(0); QMessageBox.information(self,"가져오기 완료","백업을 불러왔습니다.")
-            except Exception: QMessageBox.warning(self,"가져오기 실패","올바른 SideMemo 백업 파일이 아닙니다.")
+                self.require_idle_auth()
+                self.save_timer.stop()
+                self.save_editor()
+                candidate = restore_backup(path, self.data, DEFAULT, DATA_FILE, ATTACH_DIR)
+                self.data = candidate
+                self.active = 0
+                self.set_note(0)
+                QMessageBox.information(self,"가져오기 완료","백업 메모를 불러왔습니다. 현재 계정과 설정은 유지됩니다.")
+            except Exception:
+                QMessageBox.warning(self,"가져오기 실패","백업이 손상되었거나 저장할 수 없습니다. 기존 메모와 첨부 파일은 유지됩니다.")
     def update_autostart(self):
         import winreg
         key=winreg.OpenKey(winreg.HKEY_CURRENT_USER,r"Software\Microsoft\Windows\CurrentVersion\Run",0,winreg.KEY_SET_VALUE)

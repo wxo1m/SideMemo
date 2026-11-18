@@ -62,12 +62,29 @@
   }
 
   function clean(html) {
-    return String(html || "")
-      .replace(/<script[\s\S]*?<\/script>/gi, "")
-      .replace(/<\/?script[^>]*>/gi, "")
-      .replace(/\son[a-z]+\s*=\s*"[^"]*"/gi, "")
-      .replace(/\son[a-z]+\s*=\s*'[^']*'/gi, "")
-      .replace(/javascript:/gi, "");
+    // Rebuild inert parsed content. Never copy attributes or foreign namespaces.
+    var template = document.createElement("template");
+    template.innerHTML = String(html || "");
+    var out = document.createElement("div");
+    var allowed = /^(P|DIV|SPAN|BR|B|STRONG|I|EM|U|S|STRIKE|DEL|UL|OL|LI|BLOCKQUOTE|PRE|CODE|H[1-6])$/;
+    var blocked = /^(SCRIPT|STYLE|IFRAME|OBJECT|EMBED|SVG|MATH|TEMPLATE|LINK|META|BASE|IMG|AUDIO|VIDEO|SOURCE)$/;
+    function copy(node, parent) {
+      if (node.nodeType === 3) { parent.appendChild(document.createTextNode(node.data)); return; }
+      if (node.nodeType !== 1 || node.namespaceURI !== "http://www.w3.org/1999/xhtml" || blocked.test(node.tagName)) return;
+      var target = parent;
+      if (allowed.test(node.tagName)) {
+        target = document.createElement(node.tagName.toLowerCase());
+        var rules = { "text-align": /^(left|right|center|justify)$/, "font-weight": /^(normal|bold|[1-9]00)$/, "font-style": /^(normal|italic)$/, "text-decoration-line": /^(underline|line-through|none)$/, "font-size": /^(?:[8-9]|[1-6][0-9]|7[0-2])(?:px|pt)$/ };
+        Object.keys(rules).forEach(function (key) {
+          var value = node.style.getPropertyValue(key).trim();
+          if (rules[key].test(value)) target.style.setProperty(key, value);
+        });
+        parent.appendChild(target);
+      }
+      Array.prototype.forEach.call(node.childNodes, function (child) { copy(child, target); });
+    }
+    Array.prototype.forEach.call(template.content.childNodes, function (node) { copy(node, out); });
+    return out.innerHTML;
   }
 
   function now() {
@@ -102,6 +119,28 @@
     if (!payload.font) payload.font = settings.font || "맑은 고딕";
     if (!payload.font_size) payload.font_size = 16;
     return payload;
+  }
+
+  function validRemoteRow(row) {
+    if (!row || typeof row !== "object" || typeof row.note_id !== "string" ||
+        !row.note_id || row.note_id.length > 128 || typeof row.deleted !== "boolean" ||
+        !Number.isInteger(row.position) || row.position < -1 || row.position > 10000 ||
+        typeof row.updated_at !== "string" || row.updated_at.length > 80) return false;
+    if (row.deleted) return true;
+    var p = row.payload;
+    if (!p || typeof p !== "object" || Array.isArray(p)) return false;
+    if (p.title != null && (typeof p.title !== "string" || p.title.length > 24)) return false;
+    if (p.html != null && (typeof p.html !== "string" || p.html.length > 2 * 1024 * 1024)) return false;
+    if (p.font != null && (typeof p.font !== "string" || p.font.length > 128)) return false;
+    if (p.font_size != null && (!Number.isInteger(p.font_size) || p.font_size < 8 || p.font_size > 72)) return false;
+    if (p.theme != null && (typeof p.theme !== "string" || !["노랑", "분홍", "파랑", "초록", "보라", "커스텀"].includes(p.theme))) return false;
+    if (p.custom_color != null && (!Array.isArray(p.custom_color) || p.custom_color.length !== 2 ||
+        !p.custom_color.every(function (color) { return typeof color === "string" && /^#[0-9a-fA-F]{6}$/.test(color); }))) return false;
+    if (p.attachment_data != null && (typeof p.attachment_data !== "string" || p.attachment_data.length > 10 * 1024 * 1024 ||
+        !/^data:image\/(png|jpeg|gif|webp);base64,[A-Za-z0-9+/=]+$/.test(p.attachment_data))) return false;
+    if (p.attachment != null && (typeof p.attachment !== "string" || p.attachment.length > 512)) return false;
+    if (p.tab_slot != null && (typeof p.tab_slot !== "string" || p.tab_slot.length > 32)) return false;
+    return true;
   }
 
   function rowFromNote(note, position) {
@@ -159,7 +198,7 @@
     ui.editor.style.fontSize = ((note && note.font_size) || 16) + "px";
     ui.editor.contentEditable = locked ? "false" : "true";
     ui.editor.style.opacity = locked ? ".6" : "1";
-    if (note && note.attachment_data) {
+    if (note && /^data:image\/(png|jpeg|gif|webp);base64,[A-Za-z0-9+/=]+$/.test(note.attachment_data || "")) {
       ui.attach.src = note.attachment_data;
       ui.attach.classList.remove("hidden");
     } else {
@@ -191,7 +230,6 @@
   }
 
   function flushEdits() {
-    if (busy) return;
     if (noteFromEditor()) {
       renderRail();
       schedulePush();
@@ -224,9 +262,11 @@
   function postgrest() { return db.from(NOTES_TABLE); }
 
   function pushDirty() {
-    if (!db || !user || busy) return Promise.resolve();
-    var rows = dirtyRows();
-    if (!rows.length) return Promise.resolve();
+    if (!db || !user || busy) return Promise.resolve(false);
+    noteFromEditor();
+    var rows = JSON.parse(JSON.stringify(dirtyRows()));
+    if (!rows.length) return Promise.resolve(true);
+    var owner = user.id;
     busy = true;
     setStatus("동기화 중…");
     return postgrest()
@@ -234,15 +274,29 @@
       .select("note_id,deleted,updated_at")
       .then(function (res) {
         if (res.error) throw res.error;
+        if (!user || user.id !== owner) return false;
+        noteFromEditor();
         (res.data || []).forEach(function (row) {
-          if (row.deleted) { tombstones[row.note_id] = row.updated_at || true; return; }
+          var sent = rows.find(function (item) { return item.note_id === row.note_id; });
+          if (!sent) return;
+          if (row.deleted) {
+            if (sent.deleted && tombstones[row.note_id] === true) tombstones[row.note_id] = row.updated_at || true;
+            return;
+          }
           var note = findNote(row.note_id);
-          if (note) { note.synced_at = row.updated_at; delete tombstones[row.note_id]; }
+          if (note && !tombstones[note.id] && JSON.stringify(rowFromNote(note, notes.indexOf(note))) === JSON.stringify(sent)) {
+            note.synced_at = row.updated_at;
+          }
         });
-        setStatus("저장했습니다 · " + now());
+        setStatus(dirtyRows().length ? "변경 내용을 추가로 저장하는 중…" : "저장했습니다 · " + now());
+        return true;
       })
-      .catch(function (err) { setStatus("동기화 실패: " + describe(err), true); })
-      .then(function () { busy = false; });
+      .catch(function (err) { setStatus("동기화 실패: " + describe(err), true); return false; })
+      .then(function (ok) {
+        busy = false;
+        if (ok && user && user.id === owner && dirtyRows().length) schedulePush();
+        return ok;
+      });
   }
 
   function describe(err) {
@@ -259,26 +313,31 @@
 
   function pullAll() {
     if (!db || !user) return Promise.resolve();
+    var owner = user.id;
     return postgrest()
       .select("note_id,position,payload,deleted,updated_at")
       .order("position", { ascending: true })
       .then(function (res) {
         if (res.error) throw res.error;
+        if (!user || user.id !== owner) throw new Error("계정이 변경되어 불러오기를 취소했습니다.");
         applyRemoteRows(res.data || []);
       })
-      .catch(function (err) { setStatus("불러오기 실패: " + describe(err), true); });
+      .catch(function (err) { setStatus("불러오기 실패: " + describe(err), true); throw err; });
   }
 
   function applyRemoteRows(rows) {
+    flushEdits();
     var changed = false;
     rows.forEach(function (row) {
-      if (!row || !row.note_id) return;
+      if (!validRemoteRow(row)) { setStatus("서버 메모 형식이 올바르지 않아 해당 항목을 건너뛰었습니다.", true); return; }
       var local = findNote(row.note_id);
       if (row.deleted) {
+        if (local && !local.synced_at) return;
         if (local) { notes.splice(notes.indexOf(local), 1); changed = true; }
         tombstones[row.note_id] = row.updated_at || true;
         return;
       }
+      if (tombstones[row.note_id]) return;
       if (local && !local.synced_at) return;                    /* 로컬 수정 우선 */
       if (local && local.synced_at === row.updated_at) return;   /* 이미 같은 상태 */
       var incoming = noteFromRow(row);
@@ -307,11 +366,8 @@
     if (!user) { ui.dlg.showModal(); return Promise.resolve(); }
     return pullAll()
       .then(function () { return pushDirty(); })
-      .then(function () {
-        notes.forEach(function (n) { n.synced_at = null; });
-        return pushDirty();
-      })
-      .then(function () { setStatus("동기화 완료 · " + now()); });
+      .then(function (ok) { if (ok && !dirtyRows().length) setStatus("동기화 완료 · " + now()); })
+      .catch(function (err) { setStatus("동기화 실패: " + describe(err), true); });
   }
 
   /* ------------------------------------------------------------------ 실시간 */
@@ -321,7 +377,7 @@
       .on("postgres_changes", { event: "*", schema: "public", table: NOTES_TABLE },
         function (payload) {
           var row = payload.new || payload.old;
-          if (!row || (row.user_id && row.user_id !== user.id)) return;
+          if (!user || !row || (row.user_id && row.user_id !== user.id)) return;
           applyRemoteRows([row]);
         })
       .subscribe();
@@ -344,14 +400,14 @@
   function afterSignIn() {
     renderAccount();
     setStatus("메모를 불러오는 중…");
-    pullSettings()
+    return pullSettings()
       .then(function () { return pullAll(); })
       .then(function () {
         if (!notes.length) {
           notes.push(blankNote(0));
           active = 0;
           render();
-          return pushDirty();
+          return pushDirty().then(function (ok) { if (!ok) throw new Error("새 메모를 저장하지 못했습니다."); });
         }
         if (active < 0 || active >= notes.length) active = 0;
         render();
@@ -386,10 +442,9 @@
     if (channel) { db.removeChannel(channel); channel = null; }
     db.auth.signOut().then(function () {
       notes = []; tombstones = {}; active = -1; user = null;
-      notes.push(blankNote(0)); active = 0;
       renderAccount(); render();
       setStatus("로그아웃했습니다.");
-    });
+    }).catch(function (err) { setStatus("로그아웃 실패: " + describe(err), true); });
   }
 
   /* -------------------------------------------------------------------- 툴바 */
@@ -425,6 +480,15 @@
 
   /* ------------------------------------------------------------------ 초기화 */
   function bindUi() {
+    ui.editor.addEventListener("paste", function (event) {
+      event.preventDefault();
+      var data = event.clipboardData;
+      if (!data) return;
+      var html = data.getData("text/html");
+      if (html) exec("insertHTML", clean(html));
+      else exec("insertText", data.getData("text/plain"));
+    });
+    ui.editor.addEventListener("drop", function (event) { event.preventDefault(); });
     ui.title.addEventListener("input", function () {
       if (noteFromEditor()) { renderRail(); schedulePush(); }
     });
@@ -510,7 +574,7 @@
         var wasSigned = !!user;
         user = next;
         if (next && !wasSigned) { notes = []; active = -1; afterSignIn(); }
-        else if (!next) { renderAccount(); }
+        else if (!next) { notes = []; tombstones = {}; active = -1; renderAccount(); render(); setStatus("로그인하면 메모가 자동으로 동기화됩니다."); }
       }, 0);
     });
   }
