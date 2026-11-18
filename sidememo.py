@@ -795,10 +795,23 @@ class SettingsDialog(QDialog):
             s.pop("settings_synced_at", None)
             for note in self.app.data["notes"]:
                 note["font"] = chosen_global_font
+                # A global font change applies to all text, including runs whose
+                # inline font-family contains spaces or uses a different quoting style.
                 if note.get("html"):
-                    note["html"] = re.sub(r"font-family:[^;\"'\s]+", f"font-family:'{chosen_global_font}'", note["html"])
+                    doc = QTextDocument()
+                    doc.setHtml(note["html"])
+                    cursor = QTextCursor(doc)
+                    cursor.select(QTextCursor.SelectionType.Document)
+                    fmt = QTextCharFormat()
+                    fmt.setFontFamilies([chosen_global_font])
+                    cursor.mergeCharFormat(fmt)
+                    doc.setDefaultFont(QFont(chosen_global_font))
+                    note["html"] = doc.toHtml()
                 note.pop("synced_at", None)
             self.app.set_note(self.app.active)
+            # set_note() normalizes the active document too; persist that result
+            # immediately so the setting survives restart and sync.
+            self.app.save_editor()
             self.app.update_autostart(); self.app.reposition(); self.app.update_opacity(); self.app.setup_tray()
             self.app.start_sync_timer()
         else:

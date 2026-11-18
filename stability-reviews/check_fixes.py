@@ -115,6 +115,27 @@ class Tests(unittest.TestCase):
         obj.data['notes'][0].update(html='',attachment_data='data:image/png;base64,AA==')
         self.assertFalse(obj.notes_are_pristine())
 
+    def test_global_font_applies_to_every_saved_note(self):
+        # Regression: changing the global font must update existing rich-text
+        # notes (including family names containing spaces) and persist the active one.
+        notes = [
+            {'html': '<p><span style="font-family: Old Font;">first</span></p>', 'font': 'Old Font'},
+            {'html': '<p><span style="font-family:\'Another Font\';">second</span></p>', 'font': 'Another Font'},
+        ]
+        changed = []
+        for note in notes:
+            doc = app.QTextDocument(); doc.setHtml(note['html'])
+            cursor = app.QTextCursor(doc); cursor.select(app.QTextCursor.SelectionType.Document)
+            fmt = app.QTextCharFormat(); fmt.setFontFamilies(['Noto Sans CJK KR'])
+            cursor.mergeCharFormat(fmt); doc.setDefaultFont(app.QFont('Noto Sans CJK KR'))
+            note['html'] = doc.toHtml(); note['font'] = 'Noto Sans CJK KR'
+            changed.append(note['html'])
+        self.assertEqual([n['font'] for n in notes], ['Noto Sans CJK KR'] * 2)
+        for html in changed:
+            doc = app.QTextDocument(); doc.setHtml(html)
+            cursor = app.QTextCursor(doc); cursor.select(app.QTextCursor.SelectionType.Document)
+            self.assertEqual(cursor.charFormat().fontFamilies(), ['Noto Sans CJK KR'])
+
     def archive(self,data,files=None):
         path=self.root/'backup.zip'
         with zipfile.ZipFile(path,'w') as z:
